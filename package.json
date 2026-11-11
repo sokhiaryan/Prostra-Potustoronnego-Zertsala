@@ -1,0 +1,22 @@
+{
+  "name": "prostra-potustoronnego-zertsala",
+  "version": "1.0.0",
+  "description": "Space of the Otherworldly Mirror: a real-time, cinematic 3D fractal explorer (WebGL2 ray marching).",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "test": "vitest run",
+    "capture": "node scripts/capture.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.48.0",
+    "pngjs": "^7.0.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}
