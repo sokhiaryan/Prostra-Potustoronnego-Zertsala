@@ -1,6 +1,8 @@
-// Persistence: finished quests, bookmarks and panel preferences in localStorage, and a
-// compact text encoding of a complete view (used for bookmarks and for share links in
-// the URL hash). Everything here tolerates missing or malformed data.
+// Persistence: finished quests, collected motes, bookmarks and settings in localStorage,
+// and a compact text encoding of a complete view (used for bookmarks, "Continue" and
+// share links in the URL hash). Everything here tolerates missing or malformed data.
+import { defaultSettings, sanitizeSettings } from '../app/settings';
+import type { Settings } from '../app/settings';
 
 /** A complete, restorable description of what is on screen. */
 export interface ViewState {
@@ -19,6 +21,8 @@ export interface ViewState {
   cam?: [number, number, number, number, number, number];
   /** 2D: centre as decimal strings and log2 zoom. */
   flat?: { re: string; im: string; zoom: number };
+  /** 3D: the view was saved in free flight and reopens that way. */
+  fly?: boolean;
 }
 
 export interface Bookmark {
@@ -30,11 +34,17 @@ export interface Bookmark {
 export interface Saved {
   quests: string[];
   bookmarks: Bookmark[];
-  prefs: { hidden: boolean; tab: number };
+  /** Collected motes, one bit per mote, keyed by world id (see game/progress.ts). */
+  motes: Record<string, number>;
+  /** encodeView() of where "Continue" resumes, or '' when there is nothing to resume. */
+  resume: string;
+  settings: Settings;
 }
 
 const KEY = 'pz.explorer.v2';
 export const MAX_BOOKMARKS = 24;
+const MAX_CODE_LENGTH = 8000; // a view code 10^2000 deep is about 1,300 characters
+const MOTE_BITS = 0xffff;
 
 const nums = (a: number[]): string => a.map((v) => String(v)).join(',');
 
@@ -49,6 +59,7 @@ export function encodeView(v: ViewState): string {
   ];
   if (v.cam) parts.push(`v=${nums(v.cam)}`);
   if (v.flat) parts.push(`m=${v.flat.re},${v.flat.im},${v.flat.zoom}`);
+  if (v.fly && v.cam) parts.push('g=1');
   return parts.join('&');
 }
 
@@ -98,11 +109,12 @@ export function decodeView(code: string, fractalCount: number, paletteCount: num
     view.flat = { re, im, zoom: z };
   }
   if (!view.cam && !view.flat) return null;
+  if (view.cam && map.get('g') === '1') view.fly = true;
   return view;
 }
 
 function emptySaved(): Saved {
-  return { quests: [], bookmarks: [], prefs: { hidden: false, tab: 0 } };
+  return { quests: [], bookmarks: [], motes: {}, resume: '', settings: defaultSettings() };
 }
 
 /** Validate an untrusted value into a Saved record. */
@@ -120,11 +132,14 @@ export function sanitizeSaved(raw: unknown): Saved {
     }
     out.bookmarks = out.bookmarks.slice(0, MAX_BOOKMARKS);
   }
-  if (r.prefs && typeof r.prefs === 'object') {
-    const p = r.prefs as Record<string, unknown>;
-    out.prefs.hidden = p.hidden === true;
-    if (typeof p.tab === 'number' && Number.isInteger(p.tab) && p.tab >= 0 && p.tab <= 2) out.prefs.tab = p.tab;
+  if (r.motes && typeof r.motes === 'object' && !Array.isArray(r.motes)) {
+    for (const [id, bits] of Object.entries(r.motes as Record<string, unknown>)) {
+      if (typeof bits === 'number' && Number.isInteger(bits) && bits > 0) out.motes[id] = bits & MOTE_BITS;
+    }
   }
+  if (typeof r.resume === 'string' && r.resume.length <= MAX_CODE_LENGTH) out.resume = r.resume;
+  // Records written before settings existed (they carried panel "prefs" instead) get the defaults.
+  out.settings = sanitizeSettings(r.settings);
   return out;
 }
 

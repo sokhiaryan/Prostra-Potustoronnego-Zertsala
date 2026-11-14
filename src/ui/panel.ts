@@ -136,7 +136,7 @@ export function buildPanel(root: HTMLElement, state: AppState, saved: Saved, hoo
   panel.append(header);
 
   // --- tabs ---
-  let tab = saved.prefs.tab;
+  let tab = 0;
   const tabBar = el('div', 'tabs');
   tabBar.setAttribute('role', 'tablist');
   const pages = TAB_NAMES.map(() => el('div', 'page'));
@@ -461,7 +461,6 @@ export function buildPanel(root: HTMLElement, state: AppState, saved: Saved, hoo
   }
 
   root.append(panel, stats, reveal, toasts);
-  document.body.classList.toggle('ui-hidden', saved.prefs.hidden);
   syncTabs();
   refresh();
   refreshExplore();

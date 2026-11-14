@@ -1,4 +1,5 @@
-// Application entry: wires state, cameras, renderers and UI together and runs the frame loop.
+// Application entry: wires state, cameras, renderers, the game and its UI together and
+// runs the frame loop.
 //
 // There are two renderers behind one picture. The GPU draws everything float32 can
 // resolve, at 60 fps. Deeper than that (about a thousand times into a 3D shape, a few
@@ -20,11 +21,12 @@ import type { QuestContext } from './explore/quests';
 import { LANDMARKS, mutateParams, pickLandmark, surpriseFractal, surpriseParams } from './explore/random';
 import { MAX_BOOKMARKS, decodeView, encodeView, loadSaved, storeSaved } from './explore/store';
 import type { ViewState } from './explore/store';
+import { WORLDS, anyDeepMote, anyWorldComplete, totalMotes, worldsOpen } from './game/progress';
 import { kifsRotation } from './math/de';
 import { DEEP_EXP, mandelMaxIter } from './math/mandel';
 import type { Scene3D } from './math/shade';
 import { GpuError } from './render/gl';
-import { Renderer } from './render/renderer';
+import { MAX_MOTES, Renderer } from './render/renderer';
 import type { FrameParams } from './render/renderer';
 import { buildPanel } from './ui/panel';
 import './ui/style.css';
@@ -118,6 +120,7 @@ function start(): void {
     rot: new Float32Array(9),
     iter: 10,
     camPos: cam.posF32,
+    camPos64: cam.pos,
     camBasis: cam.basis,
     tanFov: cam.tanFov,
     bound: 2,
@@ -134,6 +137,15 @@ function start(): void {
     bloom: 0.6,
     exposure: 1,
     flat: { cx: 0, cy: 0, half: 1.25, maxIter: 300, density: 1 },
+    // Game-only terms; off until the free-fly mode drives them.
+    lamp: 0,
+    lampRange: 1,
+    motes: new Float32Array(MAX_MOTES * 4),
+    moteCount: 0,
+    stars: 0,
+    aperture: 0,
+    focus: 1,
+    smooth: saved.settings.smoothing,
   };
 
   let dirty = true;
@@ -476,6 +488,11 @@ function start(): void {
       palettesSeen: palettesSeen.size,
       paletteCount: PALETTES.length,
       events,
+      motes: totalMotes(saved.motes),
+      worldComplete: anyWorldComplete(saved.motes),
+      deepMote: anyDeepMote(saved.motes),
+      worldsOpen: worldsOpen(saved.motes),
+      worldCount: WORLDS.length,
     };
     const fresh = newlyDone(ctx, questsDone);
     if (fresh.length === 0) return;
@@ -553,12 +570,8 @@ function start(): void {
     dirty = true;
   };
 
-  const savePrefs = (hidden: boolean, tab: number): void => {
-    if (hidden) events.add('hide');
-    saved.prefs.hidden = hidden;
-    saved.prefs.tab = tab;
-    storeSaved(saved);
-  };
+  // The panel's shown/hidden state and tab are no longer persisted; the menu replaces it.
+  const savePrefs = (): void => {};
 
   const panel = buildPanel(uiRoot, state, saved, {
     onChange: () => {

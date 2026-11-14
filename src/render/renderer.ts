@@ -1,8 +1,10 @@
 // Frame pipeline:
-//   scene (HDR, dynamic resolution) -> [accumulate when still] -> bloom chain -> composite.
+//   scene (HDR, dynamic resolution) -> [accumulate when still | reproject when moving]
+//   -> bloom chain -> composite.
 // While anything moves, the scene is rendered once per frame at a resolution scale chosen
-// to hold the frame budget. Once still, full-resolution jittered frames are averaged until
-// the sample cap is reached, then rendering stops until the next change.
+// to hold the frame budget, and (with smoothing on) blended with the reprojected previous
+// frame. Once still, full-resolution jittered frames are averaged until the sample cap is
+// reached, then rendering stops until the next change.
 // Images computed on the CPU (the deep tiers) enter through the deep* methods and share
 // the bloom and composite passes, so both kinds of picture get the same finish.
 import type { Palette } from '../app/palettes';
@@ -17,6 +19,10 @@ import mandelSrc from './shaders/mandel.frag?raw';
 import deSrc from './shaders/de.glsl?raw';
 import vertSrc from './shaders/fullscreen.vert?raw';
 import sceneSrc from './shaders/scene.frag?raw';
+import taaSrc from './shaders/taa.frag?raw';
+
+/** Most motes the scene shader draws at once. */
+export const MAX_MOTES = 8;
 
 /** Everything the scene needs for one frame. One instance is reused; nothing is allocated per frame. */
 export interface FrameParams {
@@ -25,6 +31,8 @@ export interface FrameParams {
   rot: Float32Array; // 9, column-major
   iter: number;
   camPos: Float32Array; // 3
+  /** The same position in doubles, for the frame-to-frame camera motion. */
+  camPos64: Float64Array; // 3
   camBasis: Float32Array; // 9, column-major (right, up, forward)
   tanFov: number;
   bound: number;
@@ -42,6 +50,18 @@ export interface FrameParams {
   exposure: number;
   /** The 2D Mandelbrot view (used when `fractal` is FLAT_FRACTAL). */
   flat: { cx: number; cy: number; half: number; maxIter: number; density: number };
+  /** Headlamp strength (0 = off) and the distance at which it has fallen to half. */
+  lamp: number;
+  lampRange: number;
+  /** Uncollected motes, nearest first: xyz and glow radius, MAX_MOTES of them. */
+  motes: Float32Array;
+  moteCount: number;
+  stars: number;
+  /** Lens radius in world units for depth of field (still frames only; 0 = pinhole) and the focus distance. */
+  aperture: number;
+  focus: number;
+  /** Blend moving frames over time. Ignored for the 2D view. */
+  smooth: boolean;
 }
 
 /** Index of the 2D Mandelbrot set in the fractal list; it has its own scene shader. */
@@ -50,6 +70,9 @@ export const FLAT_FRACTAL = 3;
 const BLOOM_LEVELS = 6;
 const GPU_BUDGET_MS = 11; // leaves headroom inside a 16.7 ms frame
 const MIN_SCALE = 0.35;
+/** Share of each moving frame in the smoothed image; the rest is reprojected history. */
+const TAA_BLEND = 0.1;
+const TAA_JITTER_CYCLE = 16;
 const FRACTAL_NAMES = ['Mandelbulb', 'Mandelbox', 'Kaleido Menger', 'Mandelbrot 2D'];
 
 function halton(index: number, base: number): number {
@@ -85,6 +108,14 @@ export class Renderer {
   private readonly upProg: Program;
   private readonly compositeProg: Program;
   private readonly mergeProg: Program;
+  private readonly taaProg: Program;
+  // Camera of the frame held in accum[accumIdx], for reprojection.
+  private histValid = false;
+  private histFractal = -1;
+  private readonly prevPos = new Float64Array(3);
+  private readonly prevBasis = new Float32Array(9);
+  private prevTanFov = 1;
+  private jitterIdx = 0;
   private scene: Target | null = null;
   private accum: Target[] = [];
   private accumIdx = 0;
@@ -123,6 +154,7 @@ export class Renderer {
     this.upProg = createProgram(gl, vertSrc, upSrc, 'bloom upsample');
     this.compositeProg = createProgram(gl, vertSrc, compositeSrc, 'composite');
     this.mergeProg = createProgram(gl, vertSrc, mergeSrc, 'deep merge');
+    this.taaProg = createProgram(gl, vertSrc, taaSrc, 'temporal smoothing');
     this.query = caps.timer ? gl.createQuery() : null;
     gl.disable(gl.DEPTH_TEST);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -136,6 +168,11 @@ export class Renderer {
 
   get converged(): boolean {
     return this.samples >= this.sampleCap;
+  }
+
+  /** Forget the previous frame, e.g. after the view jumps somewhere unrelated. */
+  resetHistory(): void {
+    this.histValid = false;
   }
 
   /** Compile the scene shader for a fractal on first use; throws GpuError on failure. */
@@ -182,6 +219,7 @@ export class Renderer {
     }
     this.samples = 0;
     this.lastSrc = null;
+    this.histValid = false;
   }
 
   /**
@@ -213,8 +251,21 @@ export class Renderer {
     gl.viewport(0, 0, sw, sh);
     sp.use();
     const n = this.samples + 1;
+    const smooth = moving && fp.smooth && fp.fractal !== FLAT_FRACTAL;
+    if (fp.fractal !== this.histFractal) this.histValid = false;
+    this.histFractal = fp.fractal;
+    let jx = 0;
+    let jy = 0;
+    if (!moving) {
+      jx = halton(n, 2) - 0.5;
+      jy = halton(n, 3) - 0.5;
+    } else if (smooth) {
+      this.jitterIdx = (this.jitterIdx % TAA_JITTER_CYCLE) + 1;
+      jx = halton(this.jitterIdx, 2) - 0.5;
+      jy = halton(this.jitterIdx, 3) - 0.5;
+    }
     gl.uniform2f(sp.loc('uRes'), sw, sh);
-    gl.uniform2f(sp.loc('uJitter'), moving ? 0 : halton(n, 2) - 0.5, moving ? 0 : halton(n, 3) - 0.5);
+    gl.uniform2f(sp.loc('uJitter'), jx, jy);
     gl.uniform3fv(sp.loc('uCamPos'), fp.camPos);
     gl.uniformMatrix3fv(sp.loc('uCamBasis'), false, fp.camBasis);
     gl.uniform1f(sp.loc('uTanFov'), fp.tanFov);
@@ -243,6 +294,20 @@ export class Renderer {
     gl.uniform3f(sp.loc('uGlowCol'), pal.glow[0], pal.glow[1], pal.glow[2]);
     gl.uniform1f(sp.loc('uFogDensity'), fp.fogDensity);
     gl.uniform1f(sp.loc('uGlow'), fp.glow);
+    gl.uniform1f(sp.loc('uLamp'), fp.lamp);
+    gl.uniform1f(sp.loc('uLampRange'), fp.lampRange);
+    gl.uniform4fv(sp.loc('uMotes'), fp.motes);
+    gl.uniform1i(sp.loc('uMoteCount'), Math.min(MAX_MOTES, fp.moteCount));
+    gl.uniform1f(sp.loc('uStars'), fp.stars);
+    // Depth of field needs many samples to resolve, so it is drawn only once the view is still.
+    const lens = !moving && fp.aperture > 0;
+    if (lens) {
+      const lr = Math.sqrt(halton(n, 5));
+      const la = halton(n, 7) * Math.PI * 2;
+      gl.uniform2f(sp.loc('uLens'), lr * Math.cos(la), lr * Math.sin(la));
+    }
+    gl.uniform1f(sp.loc('uAperture'), lens ? fp.aperture : 0);
+    gl.uniform1f(sp.loc('uFocus'), fp.focus);
     // 2D view; these locations are null (and the calls no-ops) in the 3D programs, and vice versa.
     gl.uniform2f(sp.loc('uCenter'), fp.flat.cx, fp.flat.cy);
     gl.uniform1f(sp.loc('uHalf'), fp.flat.half);
@@ -270,15 +335,54 @@ export class Renderer {
       this.accumIdx = 1 - this.accumIdx;
       this.samples = n;
       src = next.tex;
+    } else if (smooth) {
+      // --- reproject and blend (moving frames) ---
+      const prev = this.accum[this.accumIdx];
+      const next = this.accum[1 - this.accumIdx];
+      gl.bindFramebuffer(gl.FRAMEBUFFER, next.fbo);
+      gl.viewport(0, 0, W, H);
+      const tp = this.taaProg;
+      tp.use();
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, scene.tex);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, prev.tex);
+      gl.uniform1i(tp.loc('uCur'), 0);
+      gl.uniform1i(tp.loc('uHist'), 1);
+      gl.uniform2f(tp.loc('uCurSize'), sw, sh);
+      gl.uniform2f(tp.loc('uTexSize'), W, H);
+      gl.uniform2f(tp.loc('uJitter'), jx, jy);
+      gl.uniformMatrix3fv(tp.loc('uCamBasis'), false, fp.camBasis);
+      gl.uniform1f(tp.loc('uTanFov'), fp.tanFov);
+      gl.uniformMatrix3fv(tp.loc('uPrevBasis'), false, this.prevBasis);
+      gl.uniform1f(tp.loc('uPrevTanFov'), this.prevTanFov);
+      // The difference is taken in doubles: deep in a fractal it is far below float32's resolution of the positions.
+      gl.uniform3f(
+        tp.loc('uCamDelta'),
+        fp.camPos64[0] - this.prevPos[0],
+        fp.camPos64[1] - this.prevPos[1],
+        fp.camPos64[2] - this.prevPos[2],
+      );
+      gl.uniform1f(tp.loc('uBlend'), this.histValid ? TAA_BLEND : 1);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.activeTexture(gl.TEXTURE0);
+      this.accumIdx = 1 - this.accumIdx;
+      src = next.tex;
     }
+    // accum[accumIdx] now holds this frame (averaged or blended) unless smoothing is off.
+    const full = !moving || smooth;
+    this.histValid = full;
+    this.prevPos.set(fp.camPos64);
+    this.prevBasis.set(fp.camBasis);
+    this.prevTanFov = fp.tanFov;
 
     this.lastSrc = src;
-    this.lastUvX = sw / W;
-    this.lastUvY = sh / H;
+    this.lastUvX = full ? 1 : sw / W;
+    this.lastUvY = full ? 1 : sh / H;
     this.lastBloom = fp.bloom;
     this.lastExposure = fp.exposure;
 
-    this.bloomChain(src, sw, sh);
+    this.bloomChain(src, full ? W : sw, full ? H : sh);
     this.composite();
     if (timed) this.endTimer();
     return true;
@@ -343,6 +447,7 @@ export class Renderer {
     const W = this.width;
     const H = this.height;
     this.samples = 0; // the GPU path starts a fresh accumulation when it takes over again
+    this.histValid = false;
     gl.bindVertexArray(this.vao);
     gl.disable(gl.BLEND);
     gl.bindFramebuffer(gl.FRAMEBUFFER, scene.fbo);

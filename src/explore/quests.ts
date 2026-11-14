@@ -17,8 +17,16 @@ export interface QuestContext {
   fractalsSeen: number;
   palettesSeen: number;
   paletteCount: number;
-  /** One-off actions that have happened: 'png', 'bookmark', 'surprise', 'mutate', 'share', 'hide'. */
+  /** One-off actions that have happened: 'png', 'bookmark', 'surprise', 'mutate', 'share', 'boost', 'slide'. */
   events: ReadonlySet<string>;
+  /** Motes collected across all worlds. */
+  motes: number;
+  /** Every mote of at least one world has been collected. */
+  worldComplete: boolean;
+  /** One of the three deepest motes of any world has been collected. */
+  deepMote: boolean;
+  worldsOpen: number;
+  worldCount: number;
 }
 
 export interface Quest {
@@ -38,21 +46,63 @@ export const QUESTS: Quest[] = [
   {
     id: 'closer',
     title: 'A closer look',
-    hint: 'Scroll to zoom in to 5× on anything.',
-    reward: 'Zoom always heads for the point under the cursor.',
+    hint: 'Fly up to a surface, or scroll in Study, until the depth reads 5×.',
+    reward: 'Flight slows as a surface nears, so there is always time to look.',
     done: (c) => c.depth >= Math.log10(5),
   },
   {
+    id: 'firstlight',
+    title: 'First light',
+    hint: 'Fly into a mote. The ring on screen points to the nearest one.',
+    reward: 'Each world hides seven, each deeper in than the last.',
+    done: (c) => c.motes >= 1,
+  },
+  {
+    id: 'afterburner',
+    title: 'Afterburner',
+    hint: 'Hold Shift while flying.',
+    reward: 'The scroll wheel changes gear as well, from a crawl to four times the pace.',
+    done: (c) => c.events.has('boost'),
+  },
+  {
+    id: 'wallrider',
+    title: 'Wall rider',
+    hint: 'Fly into a surface at a shallow angle and keep going.',
+    reward: 'The camera glances off instead of stopping, so tunnels can be followed by feel.',
+    done: (c) => c.events.has('slide'),
+  },
+  {
+    id: 'descent',
+    title: 'The descent',
+    hint: 'Collect one of the three deepest motes of any world.',
+    reward: 'It sat more than ten times deeper in than the first one.',
+    done: (c) => c.deepMote,
+  },
+  {
+    id: 'seven',
+    title: 'All seven',
+    hint: 'Collect every mote in one world.',
+    reward: 'One world known from its skin to its smallest crevice.',
+    done: (c) => c.worldComplete,
+  },
+  {
+    id: 'cartographer',
+    title: 'Cartographer',
+    hint: 'Collect enough motes to open every world.',
+    reward: 'Six shapes, three rules. The rest is parameters.',
+    done: (c) => c.worldsOpen >= c.worldCount,
+  },
+  {
     id: 'worlds',
-    title: 'Four worlds',
-    hint: 'Visit all four fractals.',
+    title: 'Four fractals',
+    hint: 'Visit all four fractals, including the flat one in Deep Zoom.',
     reward: 'Three solids and one flat set, all from repeating a simple rule.',
     done: (c) => c.fractalsSeen >= 4,
   },
   {
     id: 'chromatic',
     title: 'Chromatic',
-    hint: 'Try every palette.',
+    hint: 'Try every palette in the Tuner (key T).',
     reward: 'Colour follows the orbit: where a point wandered, or how fast it escaped.',
     done: (c) => c.palettesSeen >= c.paletteCount,
   },
@@ -66,7 +116,7 @@ export const QUESTS: Quest[] = [
   {
     id: 'cream',
     title: 'Whipped cream',
-    hint: 'Mandelbulb: lower Power to 2.',
+    hint: 'Mandelbulb: lower Power to 2 in the Tuner.',
     reward: 'The direct 3D analogue of the flat set turns out strangely smooth.',
     done: (c) => c.fractal === BULB && c.params[0] <= 2.05,
   },
@@ -107,21 +157,21 @@ export const QUESTS: Quest[] = [
   {
     id: 'hundred',
     title: 'Into the surface',
-    hint: 'Zoom any 3D fractal to 100×.',
+    hint: 'Get within a hundredth of a world\'s size of its surface: depth 100×.',
     reward: 'The view adds iterations as you descend, so there is always new detail.',
     done: (c) => c.fractal !== MANDEL && c.depth >= 2,
   },
   {
     id: 'floatline',
     title: 'Past the float line',
-    hint: 'Keep zooming a 3D fractal until the processor takes over (around 1,000×).',
+    hint: 'Flight ends near 1,000×. Switch to Study (Tab) and keep scrolling in until the processor takes over.',
     reward: 'The graphics card ran out of digits; your CPU cores are drawing now.',
     done: (c) => c.fractal !== MANDEL && c.cpu,
   },
   {
     id: 'million',
     title: 'One in a million',
-    hint: 'Zoom a 3D fractal to 1,000,000×.',
+    hint: 'In Study (Tab), zoom a 3D fractal to 1,000,000×.',
     reward: 'If what you see now were a metre across, the whole shape would span a thousand kilometres.',
     done: (c) => c.fractal !== MANDEL && c.depth >= 6,
   },
@@ -177,30 +227,23 @@ export const QUESTS: Quest[] = [
   {
     id: 'dice',
     title: 'Roll the dice',
-    hint: 'Press Surprise me.',
-    reward: 'Most random settings are dull, a few are wonderful. Use Mutate to search around the good ones.',
+    hint: 'Press X for a random shape, or a random place in the flat set.',
+    reward: 'Most random settings are dull, a few are wonderful. Mutate (key M) searches around the good ones.',
     done: (c) => c.events.has('surprise'),
   },
   {
     id: 'collector',
     title: 'Collector',
-    hint: 'Save a bookmark of a place you like.',
-    reward: 'Bookmarks keep the exact view, however deep.',
+    hint: 'Bookmark a place you like (key K).',
+    reward: 'Bookmarks keep the exact view, however deep. They wait in the Gallery.',
     done: (c) => c.events.has('bookmark'),
   },
   {
     id: 'postcard',
     title: 'Postcard',
-    hint: 'Save a PNG (key P).',
-    reward: 'The file is the finished image at full quality.',
+    hint: 'Open Photo mode (key P) and save a PNG.',
+    reward: 'The file is the finished image at full quality. Try the aperture for depth of field.',
     done: (c) => c.events.has('png'),
-  },
-  {
-    id: 'darkroom',
-    title: 'Nothing but the picture',
-    hint: 'Hide the panel (key H).',
-    reward: 'Press H again, or use the Controls button, to bring it back.',
-    done: (c) => c.events.has('hide'),
   },
 ];
 
