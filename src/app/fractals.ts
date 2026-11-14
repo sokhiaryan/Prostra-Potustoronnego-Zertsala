@@ -1,5 +1,7 @@
-// The three fractals: their live parameters, safe marching factors and CPU distance functions.
-import { deBox, deBulb, deKifs } from '../math/de';
+// The fractals: their live parameters, safe marching factors and CPU distance functions.
+// The first three are 3D distance-estimated shapes; the fourth is the flat Mandelbrot set,
+// which shares the picker, parameters and palettes but is drawn by its own renderer.
+import { deBox, deBoxTrap, deBulb, deBulbTrap, deKifs, deKifsTrap } from '../math/de';
 
 export interface ParamDef {
   label: string;
@@ -11,6 +13,8 @@ export interface ParamDef {
 
 export interface FractalDef {
   name: string;
+  /** True for the 2D Mandelbrot set; the 3D-only members below are then unused placeholders. */
+  flat?: boolean;
   /** Up to four parameters; index i is uploaded as uP[i]. */
   params: ParamDef[];
   iter: { min: number; max: number; def: number };
@@ -27,11 +31,22 @@ export interface FractalDef {
   /** Gentle animated variation of the parameters at time t (seconds). */
   breathe(base: ArrayLike<number>, t: number, out: Float32Array): void;
   dist(p: ArrayLike<number>, rot: ArrayLike<number>, iter: number, x: number, y: number, z: number): number;
+  /** Same distance, also writing the orbit trap (x, y, z, r^2 minima) used for colouring. */
+  trap(
+    p: ArrayLike<number>,
+    rot: ArrayLike<number>,
+    iter: number,
+    x: number,
+    y: number,
+    z: number,
+    out: Float64Array,
+  ): number;
 }
 
 export const BULB = 0;
 export const BOX = 1;
 export const KIFS = 2;
+export const MANDEL = 3;
 
 const boxExtent = (p: ArrayLike<number>): number =>
   (2 * Math.max(p[2], 0.5) * (Math.abs(p[0]) + 1)) / (Math.abs(p[0]) - 1);
@@ -57,6 +72,7 @@ export const FRACTALS: FractalDef[] = [
       out[3] = 0;
     },
     dist: (p, _rot, iter, x, y, z) => deBulb(x, y, z, p[0], p[1], p[2], iter),
+    trap: (p, _rot, iter, x, y, z, out) => deBulbTrap(x, y, z, p[0], p[1], p[2], iter, out),
   },
   {
     name: 'Mandelbox',
@@ -78,6 +94,7 @@ export const FRACTALS: FractalDef[] = [
       out[3] = 0;
     },
     dist: (p, _rot, iter, x, y, z) => deBox(x, y, z, p[0], p[1], p[2], iter),
+    trap: (p, _rot, iter, x, y, z, out) => deBoxTrap(x, y, z, p[0], p[1], p[2], iter, out),
   },
   {
     name: 'Kaleido Menger',
@@ -100,5 +117,25 @@ export const FRACTALS: FractalDef[] = [
       out[3] = base[3] + 0.03 * Math.sin(t * 0.33);
     },
     dist: (p, rot, iter, x, y, z) => deKifs(x, y, z, p[0], rot, p[3], iter),
+    trap: (p, rot, iter, x, y, z, out) => deKifsTrap(x, y, z, p[0], rot, p[3], iter, out),
+  },
+  {
+    name: 'Mandelbrot 2D',
+    flat: true,
+    params: [
+      { label: 'Iteration budget', min: 0.25, max: 8, step: 0.05, def: 1 },
+      { label: 'Colour density', min: 0.2, max: 4, step: 0.01, def: 1 },
+    ],
+    iter: { min: 1, max: 1, def: 1 },
+    stepScale: 1,
+    trapWeights: [0, 0, 0, 0],
+    bound: () => 2,
+    coordScale: () => 1,
+    detailBase: () => 2,
+    breathe(base, _t, out) {
+      for (let i = 0; i < 4; i++) out[i] = base[i];
+    },
+    dist: () => 1,
+    trap: () => 1,
   },
 ];

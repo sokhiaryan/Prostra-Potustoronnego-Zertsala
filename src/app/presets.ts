@@ -1,5 +1,5 @@
 // Curated views. The first preset is what the app opens on.
-import { BOX, BULB, KIFS } from './fractals';
+import { BOX, BULB, KIFS, MANDEL } from './fractals';
 
 export interface Preset {
   name: string;
@@ -8,12 +8,16 @@ export interface Preset {
   iter: number;
   palette: number;
   palShift: number;
-  cam: [number, number, number];
-  target: [number, number, number];
+  cam: readonly [number, number, number];
+  target: readonly [number, number, number];
   /** Sun azimuth and elevation in radians. */
   sunAz: number;
   sunEl: number;
+  /** 2D presets: centre as decimal strings (any number of digits) and log2 of the zoom. */
+  view?: { re: string; im: string; zoom: number };
 }
+
+const FLAT = { iter: 1, cam: [0, 0, 3], target: [0, 0, 0], sunAz: 1.5, sunEl: 0.75 } as const;
 
 export const PRESETS: Preset[] = [
   {
@@ -57,6 +61,29 @@ export const PRESETS: Preset[] = [
     palette: 5, palShift: 0.2,
     cam: [1.9, 1.3, 2.3], target: [0, 0, 0],
     sunAz: 1.5, sunEl: 0.7,
+  },
+  {
+    ...FLAT,
+    name: 'Mandelbrot',
+    fractal: MANDEL, params: [1, 1, 0, 0],
+    palette: 3, palShift: 0,
+    view: { re: '-0.65', im: '0', zoom: 0 },
+  },
+  {
+    ...FLAT,
+    name: 'Seahorse',
+    fractal: MANDEL, params: [1, 1, 0, 0],
+    palette: 1, palShift: 0,
+    view: { re: '-0.743643887037151', im: '0.131825904205330', zoom: 16 },
+  },
+  {
+    // The dendrite tip at c = i looks the same at every depth: 10^320 times in, far past
+    // the range of doubles, and still only about a thousand iterations per pixel.
+    ...FLAT,
+    name: 'Dendrite',
+    fractal: MANDEL, params: [1, 1, 0, 0],
+    palette: 0, palShift: 0,
+    view: { re: '0', im: '1', zoom: 1063 },
   },
 ];
 

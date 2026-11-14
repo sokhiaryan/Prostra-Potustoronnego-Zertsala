@@ -3,6 +3,8 @@
 // While anything moves, the scene is rendered once per frame at a resolution scale chosen
 // to hold the frame budget. Once still, full-resolution jittered frames are averaged until
 // the sample cap is reached, then rendering stops until the next change.
+// Images computed on the CPU (the deep tiers) enter through the deep* methods and share
+// the bloom and composite passes, so both kinds of picture get the same finish.
 import type { Palette } from '../app/palettes';
 import { Program, createContext, createProgram, createTarget, deleteTarget } from './gl';
 import type { Caps, Target } from './gl';
@@ -10,6 +12,8 @@ import accumSrc from './shaders/accumulate.frag?raw';
 import downSrc from './shaders/bloom_down.frag?raw';
 import upSrc from './shaders/bloom_up.frag?raw';
 import compositeSrc from './shaders/composite.frag?raw';
+import mergeSrc from './shaders/deep_merge.frag?raw';
+import mandelSrc from './shaders/mandel.frag?raw';
 import deSrc from './shaders/de.glsl?raw';
 import vertSrc from './shaders/fullscreen.vert?raw';
 import sceneSrc from './shaders/scene.frag?raw';
@@ -36,12 +40,17 @@ export interface FrameParams {
   glow: number;
   bloom: number;
   exposure: number;
+  /** The 2D Mandelbrot view (used when `fractal` is FLAT_FRACTAL). */
+  flat: { cx: number; cy: number; half: number; maxIter: number; density: number };
 }
+
+/** Index of the 2D Mandelbrot set in the fractal list; it has its own scene shader. */
+export const FLAT_FRACTAL = 3;
 
 const BLOOM_LEVELS = 6;
 const GPU_BUDGET_MS = 11; // leaves headroom inside a 16.7 ms frame
 const MIN_SCALE = 0.35;
-const FRACTAL_NAMES = ['Mandelbulb', 'Mandelbox', 'Kaleido Menger'];
+const FRACTAL_NAMES = ['Mandelbulb', 'Mandelbox', 'Kaleido Menger', 'Mandelbrot 2D'];
 
 function halton(index: number, base: number): number {
   let f = 1;
@@ -70,11 +79,12 @@ export class Renderer {
 
   private dprCap = 1.5;
   private readonly vao: WebGLVertexArrayObject | null;
-  private readonly scenePrograms: (Program | null)[] = [null, null, null];
+  private readonly scenePrograms: (Program | null)[] = [null, null, null, null];
   private readonly accumProg: Program;
   private readonly downProg: Program;
   private readonly upProg: Program;
   private readonly compositeProg: Program;
+  private readonly mergeProg: Program;
   private scene: Target | null = null;
   private accum: Target[] = [];
   private accumIdx = 0;
@@ -93,6 +103,16 @@ export class Renderer {
   private lastBloom = 0;
   private lastExposure = 1;
 
+  /** Incremented whenever the render targets are reallocated; CPU-rendered images are lost then. */
+  epoch = 0;
+  // CPU-rendered images: deep[front] is the last finished pass, the other one fills up.
+  private deep: Target[] = [];
+  private front = 0;
+  private frontW = 0;
+  private frontH = 0;
+  private backW = 0;
+  private backH = 0;
+
   constructor(readonly canvas: HTMLCanvasElement) {
     const { gl, caps } = createContext(canvas);
     this.gl = gl;
@@ -102,6 +122,7 @@ export class Renderer {
     this.downProg = createProgram(gl, vertSrc, downSrc, 'bloom downsample');
     this.upProg = createProgram(gl, vertSrc, upSrc, 'bloom upsample');
     this.compositeProg = createProgram(gl, vertSrc, compositeSrc, 'composite');
+    this.mergeProg = createProgram(gl, vertSrc, mergeSrc, 'deep merge');
     this.query = caps.timer ? gl.createQuery() : null;
     gl.disable(gl.DEPTH_TEST);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -122,7 +143,10 @@ export class Renderer {
     let p = this.scenePrograms[fractal];
     if (!p) {
       const header = `#version 300 es\n#define FRACTAL ${fractal}\nprecision highp float;\nprecision highp int;\n`;
-      p = createProgram(this.gl, vertSrc, header + deSrc + sceneSrc, FRACTAL_NAMES[fractal] ?? 'scene');
+      p =
+        fractal === FLAT_FRACTAL
+          ? createProgram(this.gl, vertSrc, mandelSrc, FRACTAL_NAMES[fractal])
+          : createProgram(this.gl, vertSrc, header + deSrc + sceneSrc, FRACTAL_NAMES[fractal] ?? 'scene');
       this.scenePrograms[fractal] = p;
     }
     return p;
@@ -143,6 +167,10 @@ export class Renderer {
     if (this.scene) deleteTarget(gl, this.scene);
     for (const t of this.accum) deleteTarget(gl, t);
     for (const t of this.bloom) deleteTarget(gl, t);
+    for (const t of this.deep) deleteTarget(gl, t);
+    this.deep = [createTarget(gl, w, h, false, gl.LINEAR), createTarget(gl, w, h, false, gl.LINEAR)];
+    this.frontW = this.frontH = this.backW = this.backH = 0;
+    this.epoch++;
     this.scene = createTarget(gl, w, h, false, gl.LINEAR);
     this.accum = [
       createTarget(gl, w, h, this.caps.float32, gl.LINEAR),
@@ -215,6 +243,11 @@ export class Renderer {
     gl.uniform3f(sp.loc('uGlowCol'), pal.glow[0], pal.glow[1], pal.glow[2]);
     gl.uniform1f(sp.loc('uFogDensity'), fp.fogDensity);
     gl.uniform1f(sp.loc('uGlow'), fp.glow);
+    // 2D view; these locations are null (and the calls no-ops) in the 3D programs, and vice versa.
+    gl.uniform2f(sp.loc('uCenter'), fp.flat.cx, fp.flat.cy);
+    gl.uniform1f(sp.loc('uHalf'), fp.flat.half);
+    gl.uniform1i(sp.loc('uMaxIter'), fp.flat.maxIter);
+    gl.uniform1f(sp.loc('uDensity'), fp.flat.density);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     // --- accumulate (still frames only) ---
@@ -249,6 +282,95 @@ export class Renderer {
     this.composite();
     if (timed) this.endTimer();
     return true;
+  }
+
+  // --- CPU-rendered (deep) images ---
+
+  /** True once a finished CPU pass is available to present. */
+  get hasDeepImage(): boolean {
+    return this.frontW > 0;
+  }
+
+  /** Drop the CPU images, e.g. when switching fractal. */
+  deepReset(): void {
+    this.frontW = this.frontH = this.backW = this.backH = 0;
+  }
+
+  /** Start receiving a pass of w x h pixels. */
+  deepBegin(w: number, h: number): void {
+    const gl = this.gl;
+    const back = this.deep[1 - this.front];
+    if (!back || w > back.w || h > back.h) {
+      this.backW = this.backH = 0;
+      return;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, back.fbo);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    this.backW = w;
+    this.backH = h;
+  }
+
+  /** Upload rows [y0, y0 + rows) of the pass in progress (linear RGBA floats, bottom row first). */
+  deepBand(y0: number, rows: number, w: number, data: Float32Array): void {
+    const gl = this.gl;
+    const back = this.deep[1 - this.front];
+    if (!back || w !== this.backW || y0 + rows > this.backH) return; // from before a resize
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, back.tex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, y0, w, rows, gl.RGBA, gl.FLOAT, data);
+  }
+
+  /** The pass in progress is complete: it becomes the image that is shown. */
+  deepSwap(): void {
+    if (this.backW === 0) return;
+    this.front = 1 - this.front;
+    this.frontW = this.backW;
+    this.frontH = this.backH;
+    this.backW = this.backH = 0;
+  }
+
+  /**
+   * Draw the CPU image through bloom and the composite. `xform` (uv scale xy, offset zw)
+   * places the finished image when the view has moved since it was rendered; `showBack`
+   * overlays the bands of the pass in progress.
+   */
+  presentDeep(xform: Float32Array | null, showBack: boolean, bloom: number, exposure: number): void {
+    const gl = this.gl;
+    this.resize();
+    const scene = this.scene;
+    if (!scene) return;
+    const W = this.width;
+    const H = this.height;
+    this.samples = 0; // the GPU path starts a fresh accumulation when it takes over again
+    gl.bindVertexArray(this.vao);
+    gl.disable(gl.BLEND);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, scene.fbo);
+    gl.viewport(0, 0, W, H);
+    const mp = this.mergeProg;
+    mp.use();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.deep[this.front].tex);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.deep[1 - this.front].tex);
+    gl.uniform1i(mp.loc('uFront'), 0);
+    gl.uniform1i(mp.loc('uBack'), 1);
+    gl.uniform2f(mp.loc('uFrontScale'), this.frontW / W, this.frontH / H);
+    gl.uniform2f(mp.loc('uFrontMax'), (this.frontW - 0.5) / W, (this.frontH - 0.5) / H);
+    gl.uniform2f(mp.loc('uBackSize'), showBack ? this.backW : 0, showBack ? this.backH : 0);
+    if (xform) gl.uniform4fv(mp.loc('uXform'), xform);
+    else gl.uniform4f(mp.loc('uXform'), 1, 1, 0, 0);
+    gl.uniform3f(mp.loc('uVoid'), 0.004, 0.005, 0.01);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.activeTexture(gl.TEXTURE0);
+
+    this.lastSrc = scene.tex;
+    this.lastUvX = 1;
+    this.lastUvY = 1;
+    this.lastBloom = bloom;
+    this.lastExposure = exposure;
+    this.bloomChain(scene.tex, W, H);
+    this.composite();
   }
 
   private bloomChain(src: WebGLTexture, usedW: number, usedH: number): void {

@@ -50,6 +50,28 @@ export const PALETTES: Palette[] = [
   },
 ];
 
+const smooth01 = (x: number): number => {
+  const t = Math.min(1, Math.max(0, x));
+  return t * t * (3 - 2 * t);
+};
+
+/**
+ * CPU mirror of palette() in the shaders: a smooth gradient through the four stops that
+ * runs 0 -> 3 -> 0 over a period of 2. `stops` is the twelve stop components, flattened.
+ */
+export function paletteAt(stops: ArrayLike<number>, t: number, out: Float64Array | Float32Array | number[]): void {
+  const h = t * 0.5;
+  const x = (1 - Math.abs((h - Math.floor(h)) * 2 - 1)) * 3;
+  const a = smooth01(x);
+  const b = smooth01(x - 1);
+  const c = smooth01(x - 2);
+  for (let i = 0; i < 3; i++) {
+    let v = stops[i] + (stops[3 + i] - stops[i]) * a;
+    v += (stops[6 + i] - v) * b;
+    out[i] = v + (stops[9 + i] - v) * c;
+  }
+}
+
 /** CSS gradient preview of a palette's surface colours (UI swatches). */
 export function paletteCss(p: Palette): string {
   const css = (c: V3): string => {

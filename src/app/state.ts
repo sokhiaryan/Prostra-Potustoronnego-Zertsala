@@ -10,13 +10,15 @@ export interface Quality {
   shadowSteps: number;
   /** Jittered frames accumulated once the camera is still. */
   samples: number;
+  /** Samples per pixel of the final pass when the image is computed on the CPU. */
+  deepSpp: number;
 }
 
 export const QUALITIES: Quality[] = [
-  { name: 'Draft', dprCap: 1, maxSteps: 96, shadowSteps: 16, samples: 16 },
-  { name: 'Balanced', dprCap: 1.25, maxSteps: 150, shadowSteps: 28, samples: 32 },
-  { name: 'High', dprCap: 1.5, maxSteps: 220, shadowSteps: 40, samples: 48 },
-  { name: 'Ultra', dprCap: 2, maxSteps: 340, shadowSteps: 72, samples: 96 },
+  { name: 'Draft', dprCap: 1, maxSteps: 96, shadowSteps: 16, samples: 16, deepSpp: 1 },
+  { name: 'Balanced', dprCap: 1.25, maxSteps: 150, shadowSteps: 28, samples: 32, deepSpp: 2 },
+  { name: 'High', dprCap: 1.5, maxSteps: 220, shadowSteps: 40, samples: 48, deepSpp: 4 },
+  { name: 'Ultra', dprCap: 2, maxSteps: 340, shadowSteps: 72, samples: 96, deepSpp: 8 },
 ];
 
 export const DEFAULT_QUALITY = 2;
