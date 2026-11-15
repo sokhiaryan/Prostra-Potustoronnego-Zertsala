@@ -21,7 +21,9 @@ const only = argOf('--only', '');
 const PORT = 4173;
 const URL = `http://localhost:${PORT}/`;
 
-// name, preset index, optional extra steps run in the page before capture
+// Each shot is either a preset opened in Study (with an optional wheel zoom), or steps
+// to run first. `ui` keeps the interface in the picture; without it only the image is taken.
+const pz = (page, fn) => page.evaluate(fn);
 const SHOTS = [
   { name: '01-zertsalo-mandelbulb', preset: 0 },
   { name: '02-lotus-mandelbulb', preset: 1 },
@@ -31,7 +33,37 @@ const SHOTS = [
   { name: '06-thornfield-kifs', preset: 5 },
   { name: '07-deep-zoom', preset: 0, zoom: 9 },
   { name: '08-precision-limit', preset: 0, zoom: 30 },
-  { name: '09-interface', preset: 0, ui: true },
+  {
+    name: '09-main-menu',
+    ui: true,
+    // The menu's slow orbit never settles; reduce motion so the frame can converge.
+    run: (page) =>
+      pz(page, () => {
+        window.__pz.settings({ reduceMotion: true });
+        window.__pz.preset(0);
+        window.__pz.menu();
+      }),
+  },
+  { name: '10-world-select', ui: true, run: (page) => page.getByRole('button', { name: /^Free Fly/ }).click() },
+  {
+    name: '11-free-fly',
+    ui: true,
+    run: (page) =>
+      pz(page, () => {
+        window.__pz.play(2);
+        window.__pz.fly({ seconds: 2.5 });
+      }),
+  },
+  { name: '12-tuner', ui: true, run: (page) => pz(page, () => window.__pz.tuner()) },
+  {
+    name: '13-photo-mode',
+    ui: true,
+    run: (page) =>
+      pz(page, () => {
+        window.__pz.resume();
+        window.__pz.photo();
+      }),
+  },
 ];
 
 function stats(file) {
@@ -101,13 +133,9 @@ async function main() {
 
     for (const shot of SHOTS) {
       if (only && !shot.name.includes(only)) continue;
-      await page.evaluate(
-        ({ preset, ui }) => {
-          window.__pz.preset(preset);
-          window.__pz.hideUi(!ui);
-        },
-        { preset: shot.preset, ui: !!shot.ui },
-      );
+      if (shot.run) await shot.run(page);
+      else await page.evaluate((preset) => window.__pz.preset(preset), shot.preset);
+      await page.evaluate((clean) => window.__pz.clean(clean), !shot.ui);
       if (shot.zoom) {
         // Drive the real input path: wheel over the surface, a little left of centre.
         await page.mouse.move(700, 430);
@@ -118,13 +146,14 @@ async function main() {
       }
       await page.waitForTimeout(400);
       await page.waitForFunction(() => window.__pz.converged(), null, { timeout: 240000, polling: 200 });
-      await page.waitForTimeout(350); // let the panel fade finish
+      await page.waitForTimeout(350); // let the HUD text catch up
       const file = join(outDir, `${shot.name}.png`);
       await page.screenshot({ path: file });
       const s = stats(file);
       const info = await page.evaluate(() => window.__pz.info());
-      console.log(shot.name, JSON.stringify(s), `viewScale=${info.viewScale.toExponential(2)}`);
-      if (s.meanLuma < 12 || s.clippedPct > 8 || s.contrast < 8) {
+      console.log(shot.name, JSON.stringify(s), `viewScale=${info.viewScale.toExponential(2)} ${info.screen}/${info.activity}`);
+      // The menu dims the picture on purpose, so the brightness floor applies to clean frames only.
+      if ((!shot.ui && s.meanLuma < 12) || s.clippedPct > 8 || s.contrast < 8) {
         console.log(`  !! ${shot.name} looks wrong (too dark, clipped or flat)`);
         failed = true;
       }
@@ -134,7 +163,7 @@ async function main() {
     if (!only) {
       await page.evaluate(() => {
         window.__pz.preset(0);
-        window.__pz.hideUi(true);
+        window.__pz.clean(true);
       });
       await page.mouse.move(800, 450);
       await page.mouse.down();
@@ -146,7 +175,8 @@ async function main() {
       await page.mouse.up();
       console.log(`perf while orbiting: fps=${perf.fps.toFixed(1)} scale=${perf.scale.toFixed(2)} gpuMs=${perf.gpuMs.toFixed(2)} size=${perf.size}`);
 
-      // Interaction smoke test: breathing animates, PNG export produces a real image, H hides the UI.
+      // Interaction smoke test: breathing animates, PNG export produces a real image, the
+      // screens respond to the keyboard, the headlamp lights interiors and a mote can be collected.
       const check = (ok, label) => {
         console.log(`${ok ? 'ok  ' : 'FAIL'} ${label}`);
         if (!ok) failed = true;
@@ -159,8 +189,7 @@ async function main() {
       await page.waitForFunction(() => window.__pz.converged(), null, { timeout: 120000, polling: 200 });
       check(true, 'image converges again after breathing stops');
 
-      await page.keyboard.press('KeyH');
-      check(await page.evaluate(() => !document.body.classList.contains('ui-hidden')), 'H shows the panel');
+      await page.evaluate(() => window.__pz.photo());
       const [download] = await Promise.all([
         page.waitForEvent('download'),
         page.getByRole('button', { name: 'Save PNG' }).click(),
@@ -170,8 +199,53 @@ async function main() {
       const es = stats(exported);
       check(es.size === '1600x900' && es.meanLuma > 12, `PNG export (${es.size}, mean luma ${es.meanLuma})`);
       rmSync(exported, { force: true });
-      await page.keyboard.press('KeyH');
-      check(await page.evaluate(() => document.body.classList.contains('ui-hidden')), 'H hides the panel');
+
+      const where = () => page.evaluate(() => `${window.__pz.info().screen}/${window.__pz.info().activity}`);
+      await page.keyboard.press('Escape');
+      check((await where()) === 'play/study', `Esc closes Photo mode (${await where()})`);
+      await page.keyboard.press('Escape');
+      check((await where()) === 'pause/study', `Esc pauses (${await where()})`);
+      await page.waitForTimeout(350);
+      await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('Enter');
+      check((await where()) === 'tuner/study', `arrow keys and Enter choose a pause menu item (${await where()})`);
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('Tab');
+      check((await where()) === 'play/fly', `Tab switches Study to flight (${await where()})`);
+
+      // Headlamp: the same view inside the Mandelbox must be brighter with the lamp on.
+      await page.evaluate(() => {
+        window.__pz.play(2);
+        window.__pz.fly({ seconds: 2.5 });
+      });
+      const lampFile = join(outDir, '..', 'lamp-check.png');
+      const lampLuma = async (mode) => {
+        await page.evaluate((m) => window.__pz.settings({ headlamp: m }), mode);
+        await page.waitForTimeout(300);
+        await page.waitForFunction(() => window.__pz.converged(), null, { timeout: 120000, polling: 200 });
+        await page.screenshot({ path: lampFile });
+        return stats(lampFile).meanLuma;
+      };
+      const lampOff = await lampLuma('off');
+      const lampOn = await lampLuma('on');
+      rmSync(lampFile, { force: true });
+      check(lampOn > lampOff, `headlamp brightens the view (mean luma ${lampOff} off, ${lampOn} on)`);
+
+      // Motes: put the camera on the first one and let a moment of flight pass.
+      const motes = await page.evaluate(() => {
+        const pz = window.__pz;
+        pz.play(0);
+        pz.fly({ move: [0, 0, 0], seconds: 0.05 });
+        const list = pz.motes();
+        const m = list.find((x) => !x.found);
+        const before = pz.info().motesFound;
+        if (m) {
+          pz.look(m.x, m.y, m.z, 0, 0, 0);
+          pz.fly({ move: [0, 0, 0], seconds: 0.05 });
+        }
+        return { count: list.length, shown: pz.info().motesShown, before, after: pz.info().motesFound };
+      });
+      check(motes.count === 7 && motes.after === motes.before + 1, `a mote is collected by flying into it (${JSON.stringify(motes)})`);
     }
 
     if (problems.length) {

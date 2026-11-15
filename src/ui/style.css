@@ -40,15 +40,29 @@ body {
   cursor: grabbing;
 }
 
-/* ---------- panel ---------- */
+body[data-screen='play'][data-activity='fly'] #view {
+  cursor: crosshair;
+}
 
-.panel {
+/* ---------- menu ---------- */
+
+.menu {
   position: fixed;
-  top: 16px;
-  right: 16px;
-  bottom: 16px;
-  width: 304px;
-  padding: 20px 18px 16px;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow-y: auto;
+  background: radial-gradient(120% 100% at 50% 40%, rgba(5, 6, 12, 0.3) 0%, rgba(5, 6, 12, 0.8) 100%);
+}
+
+.menu[hidden] {
+  display: none;
+}
+
+.menu-card,
+.sheet {
   overflow-y: auto;
   overscroll-behavior: contain;
   background: var(--glass);
@@ -57,21 +71,258 @@ body {
   backdrop-filter: blur(22px) saturate(150%);
   -webkit-backdrop-filter: blur(22px) saturate(150%);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.07);
-  transition: opacity 0.25s ease, transform 0.25s ease;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
 
-.panel-header {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  margin-bottom: 14px;
+.menu-card {
+  width: min(440px, 100%);
+  max-height: calc(100vh - 48px);
+  padding: 26px 24px 22px;
 }
 
-.titles {
-  flex: 1;
-  min-width: 0;
+.menu-card[data-page='worlds'] {
+  width: min(760px, 100%);
+}
+
+.menu-card[data-page='codex'],
+.menu-card[data-page='settings'] {
+  width: min(540px, 100%);
+}
+
+.menu-titles {
+  margin-bottom: 20px;
+}
+
+.menu-titles .title {
+  font-size: 28px;
+}
+
+.menu-progress {
+  margin: 14px 0 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.menu-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.menu-title {
+  margin: 0;
+  font: italic 400 21px/1.2 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+}
+
+.menu-items {
+  display: grid;
+  gap: 6px;
+}
+
+.menu-item,
+.world-card {
+  appearance: none;
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 10px 14px;
+  font: inherit;
+  text-align: left;
+  color: var(--ink);
+  background: var(--chip);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.menu-item:hover,
+.menu-item:focus-visible,
+.world-card:hover:not(:disabled),
+.world-card:focus-visible {
+  background: var(--chip-hover);
+  border-color: rgba(159, 212, 255, 0.55);
+  outline: none;
+}
+
+.menu-item-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.menu-item-detail {
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.world-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.world-card {
+  gap: 5px;
+  padding: 14px;
+  align-content: start;
+}
+
+.world-card.locked {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.world-name {
+  font: italic 400 19px/1.2 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+  color: #fff;
+}
+
+.world-kind {
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.world-blurb {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+}
+
+.world-state {
+  margin-top: 4px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pill {
+  appearance: none;
+  flex: none;
+  padding: 6px 13px;
+  font: inherit;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  background: rgba(8, 10, 20, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.pill:hover {
+  background: rgba(30, 36, 64, 0.7);
+}
+
+.pill[hidden] {
+  display: none;
+}
+
+.codex-locked {
+  margin: 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--ink-dim);
+}
+
+.settings-group {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-group .guide-head {
+  margin-bottom: 0;
+}
+
+.settings-group:first-child .guide-head {
+  margin-top: 0;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.toggle-text {
+  display: grid;
+  gap: 2px;
+}
+
+.switch {
+  appearance: none;
+  flex: none;
+  position: relative;
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #f4f8ff;
+  transition: transform 0.15s ease;
+}
+
+.switch[aria-checked='true'] {
+  background: rgba(159, 212, 255, 0.5);
+  border-color: rgba(159, 212, 255, 0.7);
+}
+
+.switch[aria-checked='true']::after {
+  transform: translateX(16px);
+}
+
+/* ---------- sheets: Tuner and Photo mode ---------- */
+
+.sheet {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 3;
+  display: none;
+  width: 320px;
+  padding: 16px 18px;
+}
+
+.sheet.photo {
+  bottom: auto;
+  gap: 12px;
+}
+
+body[data-screen='tuner'] .tuner {
+  display: block;
+}
+
+body[data-screen='photo'] .photo {
+  display: grid;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
 }
 
 .icon-btn {
@@ -103,55 +354,6 @@ body {
   height: 30px;
 }
 
-/* A chevron pointing right: "push the panel off that way". */
-.chevron {
-  width: 7px;
-  height: 7px;
-  margin-left: -3px;
-  border-top: 1.5px solid currentColor;
-  border-right: 1.5px solid currentColor;
-  transform: rotate(45deg);
-}
-
-.tabs {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 4px;
-  padding: 3px;
-  margin-bottom: 4px;
-  background: rgba(0, 0, 0, 0.22);
-  border: 1px solid var(--line);
-  border-radius: 11px;
-}
-
-.tab {
-  appearance: none;
-  min-height: 28px;
-  padding: 4px 6px;
-  font: inherit;
-  font-size: 12px;
-  color: var(--ink-dim);
-  background: transparent;
-  border: 0;
-  border-radius: 8px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.tab:hover {
-  color: var(--ink);
-}
-
-.tab[aria-selected='true'] {
-  color: #fff;
-  background: var(--accent-soft);
-}
-
-.page[hidden] {
-  display: none;
-}
-
 .title {
   margin: 0;
   font: italic 400 21px/1.2 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
@@ -172,7 +374,7 @@ body {
   border-top: 1px solid var(--line);
 }
 
-.page > .section:first-child {
+.sheet-head + .section {
   border-top: 0;
 }
 
@@ -253,10 +455,11 @@ body {
 }
 
 .chip:focus-visible,
-.tab:focus-visible,
+.pill:focus-visible,
+.switch:focus-visible,
 .icon-btn:focus-visible,
 .section-title:focus-visible,
-.reveal:focus-visible,
+.touch-btn:focus-visible,
 input[type='range']:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -505,9 +708,17 @@ input[type='range']:focus-visible {
   gap: 10px;
 }
 
-.row {
+.row,
+.row-field {
   display: grid;
   gap: 5px;
+}
+
+.row-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-dim);
 }
 
 .row-head {
@@ -577,52 +788,284 @@ input[type='range']::-moz-range-thumb {
   color: var(--ink-dim);
 }
 
-/* ---------- overlays ---------- */
+/* ---------- heads-up display ---------- */
 
-.stats {
+.hud {
   position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: none;
+  pointer-events: none;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.75);
+}
+
+body[data-screen='play'] .hud {
+  display: block;
+}
+
+.hud-status {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  max-width: calc(100vw - 220px);
+}
+
+.hud-mode {
+  font-size: 11.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.hud-motes {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.hud-corner {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  display: flex;
+  gap: 8px;
+  pointer-events: auto;
+  text-shadow: none;
+}
+
+.hud-gauge {
+  position: absolute;
   left: 18px;
   bottom: 16px;
   display: grid;
-  gap: 5px;
+  gap: 6px;
+  justify-items: start;
   max-width: calc(100vw - 36px);
+}
+
+.hud-depth {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+/* The renderer line shows when asked for in Settings, and always while a slow render is in progress. */
+.stats {
+  display: none;
+  gap: 5px;
   padding: 5px 10px;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
   color: var(--ink-dim);
+  text-shadow: none;
   background: rgba(8, 10, 20, 0.4);
   border: 1px solid var(--line);
   border-radius: 12px;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  pointer-events: none;
-  transition: opacity 0.25s ease;
 }
 
-.reveal {
-  position: fixed;
-  top: 16px;
-  right: 16px;
-  padding: 7px 13px;
-  font: inherit;
-  font-size: 11.5px;
-  letter-spacing: 0.04em;
-  color: var(--ink);
-  background: rgba(8, 10, 20, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 999px;
+body.show-stats .stats,
+.stats.busy {
+  display: grid;
+}
+
+.hud .location {
+  position: absolute;
+  left: 18px;
+  bottom: 72px;
+  max-width: min(520px, calc(100vw - 36px));
+  white-space: pre-line;
+  pointer-events: auto;
+}
+
+.hud-hint,
+.hud-prompt {
+  position: absolute;
+  left: 50%;
+  margin: 0;
+  max-width: calc(100vw - 32px);
+  transform: translateX(-50%);
+  text-align: center;
+  text-shadow: none;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  cursor: pointer;
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity 0.25s ease, background 0.15s ease, visibility 0s 0.25s;
 }
 
-.reveal:hover {
-  background: rgba(30, 36, 64, 0.7);
+.hud-hint {
+  bottom: 18px;
+  padding: 6px 14px;
+  font-size: 11.5px;
+  letter-spacing: 0.03em;
+  color: var(--ink-dim);
+  background: rgba(8, 10, 20, 0.45);
+  border: 1px solid var(--line);
+  border-radius: 999px;
 }
+
+.hud-prompt {
+  bottom: 62px;
+  padding: 8px 16px;
+  font-size: 12.5px;
+  color: #fff;
+  background: rgba(12, 15, 30, 0.72);
+  border: 1px solid rgba(159, 212, 255, 0.35);
+  border-radius: 12px;
+}
+
+.reticle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: none;
+  width: 4px;
+  height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.8);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+body[data-activity='fly'] .reticle {
+  display: block;
+}
+
+/* The mote marker is placed by a transform from the top-left corner; its parts centre on that point. */
+.marker {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+}
+
+.marker-ring {
+  position: absolute;
+  translate: -50% -50%;
+  border: 1.5px solid rgba(159, 212, 255, 0.85);
+  border-radius: 50%;
+  box-shadow: 0 0 14px rgba(159, 212, 255, 0.35);
+}
+
+.marker-arrow {
+  position: absolute;
+  display: none;
+  width: 30px;
+  height: 30px;
+  translate: -50% -50%;
+}
+
+.marker-arrow::after {
+  content: '';
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  margin-top: -5px;
+  border-top: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+  transform: rotate(45deg);
+}
+
+.marker.off .marker-ring {
+  display: none;
+}
+
+.marker.off .marker-arrow {
+  display: block;
+}
+
+.marker-label {
+  position: absolute;
+  left: 0;
+  translate: -50% 0;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--accent);
+}
+
+body.no-hud .hud-status,
+body.no-hud .hud-depth,
+body.no-hud .hud-hint,
+body.no-hud .reticle,
+body.no-hud .marker {
+  display: none;
+}
+
+/* ---------- touch flight controls ---------- */
+
+.touch {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: none;
+  pointer-events: none;
+}
+
+body.touch[data-screen='play'][data-activity='fly'] .touch {
+  display: block;
+}
+
+.stick {
+  position: absolute;
+  left: 28px;
+  bottom: 34px;
+  width: 124px;
+  height: 124px;
+  background: rgba(8, 10, 20, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 50%;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.stick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 48px;
+  height: 48px;
+  margin: -24px;
+  background: rgba(159, 212, 255, 0.35);
+  border: 1px solid rgba(159, 212, 255, 0.6);
+  border-radius: 50%;
+}
+
+.touch-buttons {
+  position: absolute;
+  right: 24px;
+  bottom: 34px;
+  display: grid;
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.touch-btn {
+  appearance: none;
+  width: 72px;
+  height: 46px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  background: rgba(8, 10, 20, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 14px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+body.touch .hud-hint {
+  bottom: auto;
+  top: 52px;
+}
+
+/* ---------- toasts ---------- */
 
 .toasts {
   position: fixed;
@@ -672,31 +1115,11 @@ input[type='range']::-moz-range-thumb {
   }
 }
 
-body.ui-hidden .panel {
-  opacity: 0;
-  transform: translateX(16px);
-  pointer-events: none;
-  visibility: hidden;
-  transition: opacity 0.25s ease, transform 0.25s ease, visibility 0s 0.25s;
-}
-
-/* With the panel hidden the status pill only appears while a slow render is in progress. */
-body.ui-hidden .stats:not(.busy) {
-  opacity: 0;
-}
-
-/* The way back is always on screen: a small pill where the panel's corner was. */
-body.ui-hidden .reveal {
-  opacity: 1;
-  visibility: visible;
-  transition: opacity 0.25s ease, background 0.15s ease;
-}
-
 /* Clean frames for screenshots taken by scripts/capture.mjs. */
-body.capture .reveal,
-body.capture .stats,
+body.capture .hud,
+body.capture .touch,
 body.capture .toasts {
-  display: none;
+  display: none !important;
 }
 
 #fatal {
@@ -754,7 +1177,15 @@ body.capture .toasts {
 }
 
 @media (max-width: 720px) {
-  .panel {
+  .menu {
+    padding: 12px;
+  }
+  .menu-card {
+    max-height: calc(100vh - 24px);
+    padding: 20px 16px 16px;
+  }
+  .sheet,
+  .sheet.photo {
     top: auto;
     left: 10px;
     right: 10px;
@@ -762,15 +1193,8 @@ body.capture .toasts {
     width: auto;
     max-height: 46vh;
   }
-  .stats {
-    top: 12px;
-    bottom: auto;
-    left: 12px;
-    max-width: calc(100vw - 130px);
-  }
-  .reveal {
-    top: 12px;
-    right: 12px;
+  .hud-status {
+    max-width: calc(100vw - 170px);
   }
   .toasts {
     top: 56px;
@@ -778,11 +1202,12 @@ body.capture .toasts {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .panel,
-  .stats,
-  .reveal,
+  .menu-item,
+  .world-card,
+  .pill,
+  .switch,
+  .switch::after,
   .chip,
-  .tab,
   .toast,
   .bar-fill {
     transition: none;

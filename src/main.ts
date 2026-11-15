@@ -6,7 +6,7 @@
 // hundred times into the flat set) the same image is computed on worker threads in
 // float64, or by perturbation with arbitrary precision for the flat set, and arrives
 // in passes from coarse to fine.
-import { FRACTALS, KIFS } from './app/fractals';
+import { FRACTALS, KIFS, MANDEL } from './app/fractals';
 import { PALETTES } from './app/palettes';
 import { PRESETS, homePreset } from './app/presets';
 import { LOOK_DEFAULTS, QUALITIES, applyPreset, createState } from './app/state';
@@ -21,15 +21,37 @@ import type { QuestContext } from './explore/quests';
 import { LANDMARKS, mutateParams, pickLandmark, surpriseFractal, surpriseParams } from './explore/random';
 import { MAX_BOOKMARKS, decodeView, encodeView, loadSaved, storeSaved } from './explore/store';
 import type { ViewState } from './explore/store';
-import { WORLDS, anyDeepMote, anyWorldComplete, totalMotes, worldsOpen } from './game/progress';
+import { MOTES_PER_WORLD, generateMotes, moteCollectRadius, moteDepth, moteGlowRadius } from './game/motes';
+import type { Mote } from './game/motes';
+import {
+  TOTAL_MOTES,
+  WORLDS,
+  anyDeepMote,
+  anyWorldComplete,
+  collectMote,
+  factsRevealed,
+  hasMote,
+  isOpen,
+  totalMotes,
+  worldMotes,
+  worldOf,
+  worldsOpen,
+} from './game/progress';
+import type { World } from './game/progress';
+import { Shell } from './game/shell';
 import { kifsRotation } from './math/de';
 import { DEEP_EXP, mandelMaxIter } from './math/mandel';
 import type { Scene3D } from './math/shade';
 import { GpuError } from './render/gl';
 import { MAX_MOTES, Renderer } from './render/renderer';
 import type { FrameParams } from './render/renderer';
-import { buildPanel } from './ui/panel';
+import { buildHud } from './ui/hud';
+import type { Marker } from './ui/hud';
+import { buildMenu } from './ui/menu';
+import { buildPhoto } from './ui/photo';
 import './ui/style.css';
+import { buildTouch } from './ui/touch';
+import { buildTuner } from './ui/tuner';
 import { View2D } from './view2d/view';
 import type { Snapshot } from './view2d/view';
 
@@ -56,6 +78,15 @@ const F32_RETURN_PIXEL = 5.2e-6;
 const GPU_PREVIEW_RANGE = 30;
 /** The first CPU pass is sized to take about this long. */
 const FIRST_PASS_MS = 110;
+
+/** Study and the menu use a 50° lens; flight uses the field of view from the settings. */
+const STUDY_TAN_FOV = Math.tan((25 * Math.PI) / 180);
+/** Control hints stay up for this long in each activity, per session. */
+const HINT_SECONDS = 40;
+/** Radians per second of the slow orbit behind the main menu. */
+const ATTRACT_SPEED = 0.05;
+/** Lens radius at full aperture in Photo mode, as a fraction of the focus distance. */
+const PHOTO_APERTURE = 0.03;
 
 const SUPERSCRIPT = '⁰¹²³⁴⁵⁶⁷⁸⁹';
 
@@ -89,7 +120,6 @@ function showFatal(err: unknown): void {
   }
   box.replaceChildren(card);
   box.hidden = false;
-  document.body.classList.add('ui-hidden');
   console.error(err);
 }
 
@@ -109,6 +139,8 @@ function start(): void {
   const cam = new Camera();
   const view = new View2D();
   const saved = loadSaved();
+  const settings = saved.settings;
+  const shell = new Shell();
   const isFlat = (): boolean => !!FRACTALS[state.fractal].flat;
 
   // Reused every frame: effective (possibly animated) parameters and the uniform block.
@@ -226,6 +258,7 @@ function start(): void {
     fp.palShift = state.palShift;
     fp.bloom = state.bloom;
     fp.exposure = state.exposure;
+    fp.tanFov = cam.tanFov;
 
     if (def.flat) {
       // In the flat set "breathing" is a slow colour cycle.
@@ -260,8 +293,9 @@ function start(): void {
     fp.sunDir[1] = Math.sin(state.sunEl);
     fp.sunDir[2] = ce * Math.cos(state.sunAz);
 
-    // With workers the camera may go on down to the float64 floor; without, it stops where float32 does.
-    cam.minDist = (pool ? F64_MIN_DIST : F32_MIN_DIST) * coord;
+    // With workers the camera may go on down to the float64 floor; without them, and in
+    // flight (a CPU frame takes seconds), it stops where float32 does.
+    cam.minDist = (pool && shell.activity !== 'fly' ? F64_MIN_DIST : F32_MIN_DIST) * coord;
     cam.maxDist = fp.bound * 5;
     cam.sceneSize = fp.bound;
     cam.stepScale = def.stepScale;
@@ -273,6 +307,7 @@ function start(): void {
   const chooseTier = (): boolean => {
     if (!pool) return false;
     if (forcedTier) return forcedTier === 'cpu';
+    if (shell.activity === 'fly') return false;
     if (isFlat()) {
       const px = view.pixelExp(Math.max(1, renderer.height));
       return px < Math.log2(deep ? F32_RETURN_PIXEL : F32_MIN_PIXEL);
@@ -387,16 +422,29 @@ function start(): void {
     deep = false;
   };
 
+  /** Length scale of the view: the distance to what is being looked at, or in flight to whatever is nearest. */
+  const scaleNow = (): number => (cam.mode === 'fly' ? Math.min(cam.viewScale(), 3 * cam.proximity) : cam.viewScale());
+
+  /** After the camera has been placed somewhere new: in flight, re-read its surroundings. */
+  const settleCamera = (): void => {
+    syncFrameParams(0);
+    if (cam.mode === 'fly' && !isFlat()) cam.setMode('fly', dist);
+    fogScale = scaleNow();
+  };
+
+  /** The preset whose shape R and "Reset shape" return to. */
+  let homeIndex = 0;
+
   const loadPreset = (index: number): void => {
     const preset = PRESETS[index];
     if (!preset) return;
     resetDeep();
     applyPreset(state, index, preset);
+    homeIndex = index;
     if (preset.view) view.set(preset.view.re, preset.view.im, preset.view.zoom);
     else cam.lookAt(preset.cam[0], preset.cam[1], preset.cam[2], preset.target[0], preset.target[1], preset.target[2]);
-    fogScale = cam.viewScale();
-    syncFrameParams(0);
-    panel.refresh();
+    settleCamera();
+    tuner.refresh();
     dirty = true;
   };
 
@@ -448,16 +496,19 @@ function start(): void {
     state.sunEl = v.sunEl;
     if (v.flat) view.set(v.flat.re, v.flat.im, v.flat.zoom);
     else if (v.cam) cam.lookAt(v.cam[0], v.cam[1], v.cam[2], v.cam[3], v.cam[4], v.cam[5]);
-    fogScale = cam.viewScale();
-    syncFrameParams(0);
-    panel.refresh();
+    homeIndex = homePreset(v.fractal);
+    settleCamera();
+    tuner.refresh();
     dirty = true;
     return true;
   };
 
+  /** Open a saved view and start playing in it, the way it was saved. */
   const openCode = (code: string): boolean => {
     const v = decodeView(code, FRACTALS.length, PALETTES.length);
-    return v ? applyView(v) : false;
+    if (!v || !applyView(v)) return false;
+    shell.set('play', v.flat ? 'flat' : v.fly ? 'fly' : 'study');
+    return true;
   };
 
   // --- exploration: quests, bookmarks, surprise ---
@@ -470,7 +521,7 @@ function start(): void {
 
   /** log10 of the magnification relative to the overview. */
   const depthLog10 = (): number =>
-    isFlat() ? view.zoom * Math.LOG10E * Math.LN2 : Math.log10(fp.bound / Math.max(cam.viewScale(), 1e-300));
+    isFlat() ? view.zoom * Math.LOG10E * Math.LN2 : Math.log10(fp.bound / Math.max(scaleNow(), 1e-300));
 
   const checkQuests = (): void => {
     fractalsSeen.add(state.fractal);
@@ -499,11 +550,10 @@ function start(): void {
     for (const q of fresh) {
       questsDone.add(q.id);
       saved.quests.push(q.id);
-      panel.toast(`Discovered: ${q.title}`, q.reward);
+      hud.toast(`Discovered: ${q.title}`, q.reward);
     }
     storeSaved(saved);
-    panel.refreshExplore();
-    if (questsDone.size === QUESTS.length) panel.toast('Every discovery made', 'There is no end to the places, though.');
+    if (questsDone.size === QUESTS.length) hud.toast('Every discovery made', 'There is no end to the places, though.');
   };
 
   const screenshot = (): void => {
@@ -524,7 +574,6 @@ function start(): void {
     if (!q) return;
     state.quality = index;
     renderer.setQuality(q.dprCap, q.samples);
-    panel.refresh();
     dirty = true;
   };
 
@@ -536,7 +585,7 @@ function start(): void {
       resetDeep();
       state.preset = -1;
       view.set(lm.re, lm.im, lm.zoom);
-      panel.toast(lm.name, 'Zoom in anywhere along the boundary.');
+      hud.toast(lm.name, 'Zoom in anywhere along the boundary.');
     } else {
       const f = surpriseFractal(state.fractal, Math.random);
       const home = PRESETS[homePreset(f)];
@@ -554,10 +603,10 @@ function start(): void {
       const r = Math.hypot(home.cam[0], home.cam[1], home.cam[2]);
       const k = (fp.bound * 2.1) / r;
       cam.lookAt(home.cam[0] * k, home.cam[1] * k, home.cam[2] * k, 0, 0, 0);
-      fogScale = cam.viewScale();
+      homeIndex = homePreset(f);
     }
-    syncFrameParams(0);
-    panel.refresh();
+    settleCamera();
+    tuner.refresh();
     dirty = true;
   };
 
@@ -566,69 +615,347 @@ function start(): void {
     events.add('mutate');
     state.preset = -1;
     mutateParams(state.fractal, Math.random, state.params[state.fractal]);
-    panel.refresh();
+    tuner.refresh();
     dirty = true;
   };
 
-  // The panel's shown/hidden state and tab are no longer persisted; the menu replaces it.
-  const savePrefs = (): void => {};
+  // --- the game: screens, flight, motes ---
 
-  const panel = buildPanel(uiRoot, state, saved, {
+  const touch = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+  document.body.classList.toggle('touch', touch);
+  const photoState = { aperture: 0.35 };
+  const hintTime = { fly: 0, study: 0, flat: 0 };
+
+  const worldName = (): string => (state.preset >= 0 ? PRESETS[state.preset].name : FRACTALS[state.fractal].name);
+  /** The view on screen, remembering whether it is being flown. */
+  const viewNow = (): ViewState => ({ ...currentView(), fly: shell.activity === 'fly' && !isFlat() });
+  /** The preset to go back to: the one last loaded, if it is still this fractal. */
+  const resetIndex = (): number => (PRESETS[homeIndex]?.fractal === state.fractal ? homeIndex : homePreset(state.fractal));
+
+  /** Camera mode and lens follow what the player is doing. */
+  const syncCamera = (): void => {
+    const mode = shell.flying ? 'fly' : 'orbit';
+    if (cam.mode !== mode) {
+      if (isFlat()) cam.mode = mode;
+      else cam.setMode(mode, dist);
+    }
+    cam.tanFov = shell.activity === 'fly' ? Math.tan((settings.fov * Math.PI) / 360) : STUDY_TAN_FOV;
+    cam.speedScale = settings.speed;
+    dirty = true;
+  };
+
+  const applySettings = (): void => {
+    setQuality(settings.quality);
+    fp.smooth = settings.smoothing;
+    document.body.classList.toggle('no-hud', !settings.hud);
+    document.body.classList.toggle('show-stats', settings.stats);
+    syncCamera();
+  };
+
+  const saveResume = (): void => {
+    saved.resume = encodeView(viewNow());
+    storeSaved(saved);
+  };
+
+  let pausedAt = -1e9;
+  const pause = (): void => {
+    if (shell.screen !== 'play') return;
+    saveResume();
+    pausedAt = performance.now();
+    shell.set('pause');
+  };
+  const resume = (): void => shell.set('play');
+  const exitToMenu = (): void => {
+    saveResume();
+    shell.set('menu', isFlat() ? 'flat' : 'study');
+  };
+  const openTuner = (): void => shell.set('tuner');
+  const openPhoto = (): void => shell.set('photo');
+
+  /** Start flying in a world. Locked worlds open only for automation (`force`). */
+  const enterWorld = (index: number, force = false): boolean => {
+    const w = WORLDS[index];
+    if (!w || (!force && !isOpen(w, saved.motes))) return false;
+    loadPreset(w.preset);
+    shell.set('play', 'fly');
+    return true;
+  };
+  /** Open a preset to look at: Study for a solid, Deep Zoom for the flat set. */
+  const enterPreset = (index: number): void => {
+    if (!PRESETS[index]) return;
+    loadPreset(index);
+    shell.set('play', isFlat() ? 'flat' : 'study');
+  };
+  const enterLandmark = (index: number): void => {
+    const lm = LANDMARKS[index];
+    if (!lm) return;
+    loadPreset(homePreset(MANDEL));
+    state.preset = -1;
+    view.set(lm.re, lm.im, lm.zoom);
+    lastLandmark = index;
+    dirty = true;
+    shell.set('play', 'flat');
+  };
+
+  const toggleMode = (): void => {
+    if (shell.screen !== 'play' || isFlat()) return;
+    if (shell.activity === 'fly') {
+      shell.set('play', 'study');
+      return;
+    }
+    const floor = F32_MIN_DIST * FRACTALS[state.fractal].coordScale(eff);
+    if (deep || dist(cam.pos[0], cam.pos[1], cam.pos[2]) < floor) {
+      hud.toast('Too deep to fly', 'Flight stops where the GPU does. Zoom back out past about 1,000× first.');
+      return;
+    }
+    shell.set('play', 'fly');
+  };
+
+  const toggleBreathing = (): void => {
+    state.breathing = !state.breathing;
+    tuner.refresh();
+    dirty = true;
+  };
+
+  /** Put the shape back to the world's own, leaving the camera where it is. */
+  const resetShape = (): void => {
+    const index = resetIndex();
+    const preset = PRESETS[index];
+    resetDeep();
+    state.preset = index;
+    homeIndex = index;
+    const p = state.params[preset.fractal];
+    for (let i = 0; i < 4; i++) p[i] = preset.params[i] ?? 0;
+    state.iters[preset.fractal] = preset.iter;
+    state.breathing = false;
+    tuner.refresh();
+    dirty = true;
+  };
+
+  const bookmark = (): void => {
+    if (saved.bookmarks.length >= MAX_BOOKMARKS) {
+      hud.toast('Bookmarks are full', `Delete one in the Gallery first (${MAX_BOOKMARKS} at most).`);
+      return;
+    }
+    const name = `${worldName()} · ${formatZoom(depthLog10())}`;
+    saved.bookmarks.unshift({ name, code: encodeView(viewNow()) });
+    storeSaved(saved);
+    events.add('bookmark');
+    hud.toast('Bookmarked', `${name}. It is in the Gallery.`);
+  };
+
+  const share = (): void => {
+    const code = encodeView(viewNow());
+    history.replaceState(null, '', `#${code}`);
+    events.add('share');
+    const done = (ok: boolean): void =>
+      hud.toast(ok ? 'Link copied' : 'Link is in the address bar', 'It reopens this exact view.');
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(location.href).then(() => done(true), () => done(false));
+    else done(false);
+  };
+
+  // Motes: generated once per world, shown and collected only while flying its own shape.
+  const moteCache = new Map<string, Mote[]>();
+  const motesOf = (world: World): Mote[] => {
+    let list = moteCache.get(world.id);
+    if (!list) {
+      list = generateMotes(PRESETS[world.preset]);
+      moteCache.set(world.id, list);
+    }
+    return list;
+  };
+  /** Index into WORLDS of the world whose motes are in play, or -1. */
+  let activeWorld = -1;
+  let nearestMote: Mote | null = null;
+  const moteOrder: number[] = [];
+  const moteDist = new Float64Array(MOTES_PER_WORLD);
+
+  const collect = (world: World, index: number): void => {
+    const preset = PRESETS[world.preset];
+    const openBefore = WORLDS.filter((w) => isOpen(w, saved.motes));
+    const factsBefore = factsRevealed(preset.fractal, saved.motes);
+    if (!collectMote(saved.motes, world.id, index)) return;
+    storeSaved(saved);
+    dirty = true;
+    const have = worldMotes(saved.motes, world.id);
+    const opened = WORLDS.filter((w) => isOpen(w, saved.motes) && !openBefore.includes(w)).map((w) => PRESETS[w.preset].name);
+    let body = `${TOTAL_MOTES - totalMotes(saved.motes)} still hidden across the worlds.`;
+    if (opened.length > 0) body = `${opened.join(' and ')} ${opened.length === 1 ? 'is' : 'are'} now open in Free Fly.`;
+    else if (factsRevealed(preset.fractal, saved.motes) > factsBefore) body = `A new fact about the ${FRACTALS[preset.fractal].name} is in the Codex.`;
+    else if (have === MOTES_PER_WORLD) body = 'That is every mote in this world.';
+    hud.toast(`Mote ${have} of ${MOTES_PER_WORLD} · ${preset.name}`, body);
+  };
+
+  /**
+   * The game-only parts of the picture: headlamp, stars and motes. All of them are off
+   * in Study, so the CPU renderer (which knows none of them) always matches the GPU.
+   */
+  const updateGame = (): void => {
+    const solid = !isFlat();
+    const fly = solid && shell.activity === 'fly';
+    const depth = depthLog10();
+    fp.stars = solid && (fly || shell.screen === 'menu') ? Math.min(1, Math.max(0, 1 - depth / 2)) : 0;
+    if (!fly || settings.headlamp === 'off') fp.lamp = 0;
+    else fp.lamp = settings.headlamp === 'on' ? 1 : Math.min(1, Math.max(0, (depth - 0.15) / 0.6));
+    fp.lampRange = Math.max(scaleNow(), 1e-300) * 1.5;
+    fp.moteCount = 0;
+    nearestMote = null;
+    activeWorld = fly && !state.breathing ? worldOf(state.fractal, state.params[state.fractal]) : -1;
+    if (activeWorld < 0) return;
+    const world = WORLDS[activeWorld];
+    const list = motesOf(world);
+    moteOrder.length = 0;
+    for (let i = 0; i < list.length; i++) {
+      if (hasMote(saved.motes, world.id, i)) continue;
+      const m = list[i];
+      moteDist[i] = Math.hypot(m.x - cam.pos[0], m.y - cam.pos[1], m.z - cam.pos[2]);
+      if (shell.flying && moteDist[i] < moteCollectRadius(m)) collect(world, i);
+      else moteOrder.push(i);
+    }
+    moteOrder.sort((a, b) => moteDist[a] - moteDist[b]);
+    const n = Math.min(MAX_MOTES, moteOrder.length);
+    for (let k = 0; k < n; k++) {
+      const m = list[moteOrder[k]];
+      fp.motes[k * 4] = m.x;
+      fp.motes[k * 4 + 1] = m.y;
+      fp.motes[k * 4 + 2] = m.z;
+      fp.motes[k * 4 + 3] = moteGlowRadius(m);
+    }
+    fp.moteCount = n;
+    nearestMote = n > 0 ? list[moteOrder[0]] : null;
+  };
+
+  /** Ring around the nearest mote, or an arrow at the edge of the screen toward it. */
+  const marker: Marker = { x: 0, y: 0, r: 0, onScreen: false, angle: 0, label: '' };
+  const updateMarker = (): void => {
+    const m = nearestMote;
+    if (!m || !shell.flying || !settings.hud) {
+      hud.setMarker(null);
+      return;
+    }
+    const b = cam.basis;
+    const dx = m.x - cam.pos[0];
+    const dy = m.y - cam.pos[1];
+    const dz = m.z - cam.pos[2];
+    const x = dx * b[0] + dy * b[1] + dz * b[2];
+    const y = dx * b[3] + dy * b[4] + dz * b[5];
+    const z = dx * b[6] + dy * b[7] + dz * b[8];
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    const k = h / (2 * cam.tanFov);
+    const pad = 48;
+    const sx = w / 2 + (x / z) * k;
+    const sy = h / 2 - (y / z) * k;
+    marker.onScreen = z > 0 && sx > pad && sx < w - pad && sy > pad && sy < h - pad;
+    if (marker.onScreen) {
+      marker.x = sx;
+      marker.y = sy;
+      marker.r = Math.min(160, Math.max(9, (moteCollectRadius(m) / z) * k));
+    } else {
+      const len = Math.hypot(x, y);
+      const ux = len > 0 ? x / len : 1;
+      const uy = len > 0 ? -y / len : 0;
+      const reach = Math.min(w, h) / 2 - pad;
+      marker.x = w / 2 + ux * reach;
+      marker.y = h / 2 + uy * reach;
+      marker.r = 0;
+      marker.angle = Math.atan2(uy, ux);
+    }
+    marker.label = `mote at ${formatZoom(moteDepth(m, fp.bound))}`;
+    hud.setMarker(marker);
+  };
+
+  // --- interface ---
+
+  const hud = buildHud(uiRoot, { onMenu: pause, onToggleMode: toggleMode });
+  const tuner = buildTuner(uiRoot, state, {
     onChange: () => {
-      state.preset = state.preset; // parameters edited by hand keep the preset highlighted
       dirty = true;
     },
-    onPreset: loadPreset,
-    onFractal: (i) => loadPreset(homePreset(i)),
-    onQuality: setQuality,
-    onScreenshot: screenshot,
-    onSurprise: surprise,
     onMutate: mutate,
-    onBookmark: () => {
-      if (saved.bookmarks.length >= MAX_BOOKMARKS) {
-        panel.toast('Bookmarks are full', `Delete one first (${MAX_BOOKMARKS} at most).`);
-        return;
-      }
-      const name = `${FRACTALS[state.fractal].name} · ${formatZoom(depthLog10())}`;
-      saved.bookmarks.unshift({ name, code: encodeView(currentView()) });
-      storeSaved(saved);
-      events.add('bookmark');
-      panel.refreshExplore();
-      panel.toast('Bookmarked', name);
+    onSurprise: surprise,
+    onReset: resetShape,
+    onClose: resume,
+  });
+  const photo = buildPhoto(uiRoot, state, photoState, {
+    onChange: () => {
+      dirty = true;
     },
+    onSave: screenshot,
+    onClose: resume,
+  });
+  buildTouch(uiRoot, cam);
+  const menu = buildMenu(uiRoot, saved, {
+    onContinue: () => {
+      if (!openCode(saved.resume)) hud.toast('Nothing to continue', 'The saved place could not be opened.');
+    },
+    onWorld: (i) => enterWorld(i),
+    onFlatPreset: enterPreset,
+    onLandmark: enterLandmark,
     onOpenBookmark: (i) => {
       const b = saved.bookmarks[i];
-      if (b && !openCode(b.code)) panel.toast('This bookmark cannot be opened', 'It may come from another version.');
+      if (b && !openCode(b.code)) hud.toast('This bookmark cannot be opened', 'It may come from another version.');
     },
     onDeleteBookmark: (i) => {
       saved.bookmarks.splice(i, 1);
       storeSaved(saved);
-      panel.refreshExplore();
+      menu.refresh();
     },
-    onShare: () => {
-      const code = encodeView(currentView());
-      history.replaceState(null, '', `#${code}`);
-      events.add('share');
-      const done = (ok: boolean): void =>
-        panel.toast(ok ? 'Link copied' : 'Link is in the address bar', 'It reopens this exact view.');
-      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(location.href).then(() => done(true), () => done(false));
-      else done(false);
+    onResume: resume,
+    onTuner: openTuner,
+    onPhoto: openPhoto,
+    onBookmark: bookmark,
+    onShare: share,
+    onExit: exitToMenu,
+    onSettings: () => {
+      applySettings();
+      storeSaved(saved);
     },
-    onPrefs: savePrefs,
+    fractal: () => state.fractal,
   });
 
-  attachInput(canvas, { cam, view, dist, flat: isFlat }, {
-    toggleUi: () => panel.toggleHidden(),
-    screenshot,
-    preset: loadPreset,
-    reset: () => loadPreset(state.preset >= 0 ? state.preset : homePreset(state.fractal)),
-    toggleBreathing: () => {
-      state.breathing = !state.breathing;
-      panel.refresh();
-      dirty = true;
+  const input = attachInput(
+    canvas,
+    {
+      cam,
+      view,
+      dist,
+      mode: () => shell.inputMode(),
+      playing: () => shell.screen === 'play',
+      sensitivity: () => settings.sensitivity,
+      invertY: () => settings.invertY,
     },
-    surprise,
-    mutate,
+    {
+      escape: () => {
+        if (shell.screen === 'play') pause();
+        else if (shell.screen === 'tuner' || shell.screen === 'photo') resume();
+        // Esc that released the mouse may also arrive as a key: it must not undo the pause it caused.
+        else if (!menu.back() && shell.screen === 'pause' && performance.now() - pausedAt > 250) resume();
+      },
+      lockLost: pause,
+      toggleMode,
+      photo: openPhoto,
+      tuner: openTuner,
+      reset: () => loadPreset(resetIndex()),
+      toggleBreathing,
+      surprise,
+      mutate,
+    },
+  );
+
+  shell.onChange(() => {
+    syncCamera();
+    if (shell.screen === 'menu') menu.show('home');
+    else if (shell.screen === 'pause') menu.show('pause');
+    else menu.hide();
+    // Entering flight captures the mouse (this runs inside the click or key press that asked for it).
+    if (!shell.flying) input.release();
+    else if (!touch) input.capture();
+    if (shell.screen === 'tuner') tuner.refresh();
+    if (shell.screen === 'photo') photo.refresh();
+  });
+  window.addEventListener('pagehide', () => {
+    if (shell.screen !== 'menu') saveResume();
   });
 
   canvas.addEventListener('webglcontextlost', (e) => {
@@ -641,8 +968,12 @@ function start(): void {
     if (location.hash.length > 1) openCode(location.hash);
   });
 
-  setQuality(state.quality);
-  if (!(location.hash.length > 1 && openCode(location.hash))) loadPreset(0);
+  applySettings();
+  // A shared link opens straight into its view; otherwise the menu comes up over the first world.
+  if (!(location.hash.length > 1 && openCode(location.hash))) {
+    loadPreset(0);
+    menu.show('home');
+  }
 
   let last = performance.now();
   let lastMove = last;
@@ -668,9 +999,15 @@ function start(): void {
       if (view.update(dt)) moved = true;
       if (moved) syncFrameParams(0);
     } else {
+      cam.viewportH = canvas.clientHeight;
+      if (shell.screen === 'menu' && !settings.reduceMotion) cam.orbit(ATTRACT_SPEED * dt, 0);
       if (cam.update(dt, dist)) moved = true;
+      if (shell.flying) {
+        if (cam.boost && moved) events.add('boost');
+        if (cam.sliding) events.add('slide');
+      }
       // Fog follows the view scale so depth reads the same at every zoom; eased to hide pivot changes.
-      const scaleTarget = cam.viewScale();
+      const scaleTarget = scaleNow();
       if (Math.abs(scaleTarget - fogScale) > scaleTarget * 0.003) {
         fogScale += (scaleTarget - fogScale) * (1 - Math.exp(-dt * 6));
         moved = true;
@@ -678,7 +1015,17 @@ function start(): void {
         fogScale = scaleTarget;
       }
       fp.fogDensity = (state.fog * FOG_PER_VIEW_SCALE) / Math.max(fogScale, 1e-300);
+      // Photo mode focuses on whatever is at the centre of the picture.
+      if (shell.screen === 'photo') {
+        const t = cam.trace(0, 0, dist, canvas.clientHeight);
+        fp.focus = t > 0 ? t : cam.viewScale();
+        fp.aperture = photoState.aperture * PHOTO_APERTURE * fp.focus;
+      } else {
+        fp.aperture = 0;
+      }
     }
+    updateGame();
+    if (shell.screen === 'play') hintTime[shell.activity] += dt;
     if (dirty) {
       moved = true;
       dirty = false;
@@ -727,40 +1074,72 @@ function start(): void {
 
     if (deepNotice && deepNotice !== noticeShown) {
       noticeShown = deepNotice;
-      panel.toast('Deep zoom', deepNotice);
+      hud.toast('Deep zoom', deepNotice);
     }
+    updateMarker();
 
     if (now - lastStats > 250) {
       lastStats = now;
-      const zoom = `zoom ${formatZoom(depthLog10())}`;
       if (deep && pool) {
         if (pool.phase === 'reference') {
           const k = pool.refProgress.toLocaleString('en-US');
-          panel.setStats(`CPU · reference orbit, ${k} iterations · ${zoom}`, pool.refProgress / Math.max(1, pool.refTarget));
+          hud.setStats(`CPU · reference orbit, ${k} iterations`, pool.refProgress / Math.max(1, pool.refTarget));
         } else if (pool.phase === 'render') {
           const pct = Math.round(pool.progress * 100);
-          panel.setStats(
-            `CPU ×${pool.size} · pass ${pool.pass + 1} of ${pool.passCount} · ${pct}% · ${zoom}`,
+          hud.setStats(
+            `CPU ×${pool.size} · pass ${pool.pass + 1} of ${pool.passCount} · ${pct}%`,
             (pool.pass + pool.progress) / Math.max(1, pool.passCount),
           );
         } else {
-          panel.setStats(`CPU ×${pool.size} · finished · ${zoom}`, -1);
+          hud.setStats(`CPU ×${pool.size} · finished`, -1);
         }
       } else {
-        panel.setStats(
+        hud.setStats(
           moving
-            ? `${fps.toFixed(0)} fps · ${(renderer.scale * 100).toFixed(0)}% resolution · ${zoom}`
+            ? `${fps.toFixed(0)} fps · ${(renderer.scale * 100).toFixed(0)}% resolution`
             : renderer.converged
-              ? `converged · ${renderer.sampleCap} samples · ${zoom}`
-              : `refining ${renderer.samples}/${renderer.sampleCap} · ${zoom}`,
+              ? `converged · ${renderer.sampleCap} samples`
+              : `refining ${renderer.samples}/${renderer.sampleCap}`,
           -1,
         );
       }
       if (flat) {
         const c = view.centre();
         const cut = (s: string): string => (s.length > 44 ? `${s.slice(0, 44)}… (${s.length - 2} digits)` : s);
-        panel.setLocation(`re ${cut(c.re)}\nim ${cut(c.im)}`);
+        hud.setLocation(`re ${cut(c.re)}\nim ${cut(c.im)}`);
+      } else {
+        hud.setLocation('');
       }
+
+      const act = shell.activity;
+      hud.setDepth(`depth ${formatZoom(depthLog10())}`);
+      if (act === 'fly') {
+        const gear = Math.abs(cam.gear - 1) > 0.02 ? ` · speed ${cam.gear.toFixed(2)}×` : '';
+        hud.setMode(`Free Fly · ${worldName()}${gear}`, 'Study');
+        hud.setMotes(
+          activeWorld >= 0
+            ? `${worldMotes(saved.motes, WORLDS[activeWorld].id)} of ${MOTES_PER_WORLD} motes`
+            : state.breathing
+              ? 'Motes hide while the shape breathes (B)'
+              : 'Motes hide while the shape is changed (R resets it)',
+        );
+      } else {
+        hud.setMode(`${act === 'study' ? 'Study' : 'Deep Zoom'} · ${worldName()}`, act === 'study' ? 'Fly' : '');
+        hud.setMotes('');
+      }
+      const fresh = hintTime[act] < HINT_SECONDS;
+      let hint = '';
+      if (act === 'fly') {
+        if (touch) hint = fresh ? 'Left stick moves · drag to look around' : '';
+        else if (!input.locked) hint = 'Click to capture the mouse, or drag to look around';
+        else if (fresh) hint = 'W A S D move · Space and Q rise and sink · Shift boost · wheel speed · Tab study · Esc menu';
+      } else if (fresh) {
+        hint = act === 'study' ? 'Drag to orbit · scroll to zoom · Shift-drag to pan · Tab to fly · Esc menu' : 'Drag to move · scroll to zoom · Esc menu';
+      }
+      hud.setHint(hint);
+      hud.setPrompt(
+        shell.flying && cam.proximity <= cam.minDist * 1.5 ? 'This is as close as flight goes. Press Tab to study deeper.' : '',
+      );
       checkQuests();
     }
   };
@@ -769,21 +1148,58 @@ function start(): void {
   // Small automation surface used by scripts/capture.mjs (and handy in the console).
   Object.assign(window, {
     __pz: {
-      preset: loadPreset,
+      /** Open a preset in Study (or Deep Zoom for the flat ones). */
+      preset: enterPreset,
       quality: setQuality,
-      hideUi: (hidden: boolean) => panel.setHidden(hidden),
+      menu: exitToMenu,
+      /** Start flying in a world (index into WORLDS), locked or not. */
+      play: (world: number) => enterWorld(world, true),
+      pause,
+      resume,
+      tuner: openTuner,
+      photo: openPhoto,
+      toggleMode,
+      /**
+       * Fly a scripted path in fixed 1/60 s steps: `move` is right / up / forward in [-1, 1],
+       * `look` is yaw and pitch in radians per second. Pointer lock is unreliable headless.
+       */
+      fly: (o: { move?: [number, number, number]; look?: [number, number]; seconds?: number; boost?: boolean } = {}) => {
+        const dt = 1 / 60;
+        const steps = Math.round((o.seconds ?? 1) * 60);
+        [cam.flyX, cam.flyY, cam.flyZ] = o.move ?? [0, 0, 1];
+        cam.boost = !!o.boost;
+        for (let i = 0; i < steps; i++) {
+          if (o.look) cam.look(o.look[0] * dt, o.look[1] * dt);
+          syncFrameParams(dt);
+          cam.update(dt, dist);
+          fogScale = scaleNow();
+          updateGame();
+        }
+        cam.flyX = cam.flyY = cam.flyZ = 0;
+        cam.boost = false;
+        dirty = true;
+      },
+      settings: (patch: Partial<typeof settings>) => {
+        Object.assign(settings, patch);
+        applySettings();
+      },
+      /** The motes of the world being flown: positions, and whether each has been collected. */
+      motes: () =>
+        activeWorld < 0
+          ? []
+          : motesOf(WORLDS[activeWorld]).map((m, i) => ({ ...m, found: hasMote(saved.motes, WORLDS[activeWorld].id, i) })),
       /** Hide every overlay, for clean screenshots. */
       clean: (on: boolean) => document.body.classList.toggle('capture', on),
       /** The image on screen is final: accumulated on the GPU, or the last CPU pass has landed. */
       converged: () => (deep ? deepDone && deepSignature() === runningSig && !deepPresent : renderer.converged),
       set: (patch: Record<string, number | boolean>) => {
         Object.assign(state, patch);
-        panel.refresh();
+        tuner.refresh();
         dirty = true;
       },
       look: (px: number, py: number, pz: number, tx: number, ty: number, tz: number) => {
         cam.lookAt(px, py, pz, tx, ty, tz);
-        fogScale = cam.viewScale();
+        settleCamera();
         dirty = true;
       },
       flat: (re: string, im: string, zoom: number) => {
@@ -796,7 +1212,7 @@ function start(): void {
       },
       param: (i: number, v: number) => {
         state.params[state.fractal][i] = v;
-        panel.refresh();
+        tuner.refresh();
         dirty = true;
       },
       /** Force one renderer regardless of depth (null = automatic); used to compare the two. */
@@ -826,6 +1242,12 @@ function start(): void {
         flatIter: flatMaxIter,
         quests: saved.quests.length,
         bookmarks: saved.bookmarks.length,
+        screen: shell.screen,
+        activity: shell.activity,
+        lamp: fp.lamp,
+        motesShown: fp.moteCount,
+        motesFound: totalMotes(saved.motes),
+        proximity: cam.proximity,
       }),
     },
   });

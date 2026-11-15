@@ -48,6 +48,8 @@ export class Camera {
   boost = false;
   /** Fly mode: speed multiplier chosen by the player, GEAR_MIN to GEAR_MAX. */
   gear = 1;
+  /** Fly mode: speed multiplier from the settings, on top of the gear. */
+  speedScale = 1;
   /** Fly mode: distance estimate at the camera as of the last update. */
   proximity = 1;
   /** Fly mode: the last update was deflected along a surface. */
@@ -336,7 +338,7 @@ export class Camera {
       const d0 = dist(pos[0], pos[1], pos[2]);
       this.proximity = d0;
       let speed = Math.min(this.sceneSize, Math.max(this.minDist, d0)) * 1.4;
-      if (fly) speed *= this.gear * (this.boost ? BOOST : 1);
+      if (fly) speed *= this.gear * this.speedScale * (this.boost ? BOOST : 1);
       const a = 1 - Math.exp(-dt * FLY_RESPONSE);
       let mag = 0;
       for (let i = 0; i < 3; i++) {

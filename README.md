@@ -12,7 +12,10 @@ marched on the GPU with soft shadows, ambient occlusion, HDR bloom and filmic to
 | ![Reliquary](docs/screenshots/04-reliquary-mandelbox.png) | ![Lattice](docs/screenshots/05-lattice-kifs.png) |
 | ![Thornfield](docs/screenshots/06-thornfield-kifs.png) | ![70× into the Mandelbulb](docs/screenshots/07-deep-zoom.png) |
 
-![The interface](docs/screenshots/09-interface.png)
+| | |
+|---|---|
+| ![The main menu](docs/screenshots/09-main-menu.png) | ![Choosing a world](docs/screenshots/10-world-select.png) |
+| ![Free Fly](docs/screenshots/11-free-fly.png) | ![The Tuner](docs/screenshots/12-tuner.png) |
 
 Every image above was captured from the running app by `npm run capture`.
 
@@ -33,21 +36,45 @@ npm run capture    # headless Chrome: screenshots into docs/screenshots/ plus sm
 
 ## Controls
 
+The app opens on a main menu: **Free Fly** (pick a world), **Deep Zoom** (the flat
+Mandelbrot set), **Codex**, **Gallery** (bookmarks) and **Settings**. Each world hides seven
+motes, each deeper in than the last; collecting them opens more worlds and reveals facts in
+the Codex. A ring on screen marks the nearest mote, or an arrow points to it.
+
+**Free Fly**
+
+| Input | Action |
+|---|---|
+| Mouse (click to capture) | Look around |
+| `W` `A` `S` `D` | Move; speed follows the distance to the surface |
+| `Space` or `E`, `Q` | Rise, sink |
+| `Shift` | Boost |
+| Wheel | Speed gear |
+| `Tab` | Switch to Study and back |
+
+On a touch screen a stick moves, a drag looks around, and buttons rise, sink and boost.
+
+**Study** (and the Tuner and Photo mode, which leave the view orbitable)
+
 | Input | Action |
 |---|---|
 | Drag | Orbit around the surface point under the cursor, with inertia |
 | Scroll / pinch | Zoom toward the point under the cursor |
 | Shift-drag or right-drag | Pan |
-| `W` `A` `S` `D` `Q` `E` | Fly; speed follows the distance to the surface |
-| `1` – `6` | Presets |
-| `R` | Reset the current preset |
-| `B` | Breathing (gentle parameter animation) |
-| `P` | Save a PNG of the current image |
-| `H` | Hide or show the interface |
 
-The panel has the fractal picker, each fractal's parameters, seven palettes, light and
-atmosphere sliders, and four quality presets. The pill at the bottom left shows frame rate
-and resolution scale while moving, and accumulation progress once still.
+**Anywhere in a world**
+
+| Input | Action |
+|---|---|
+| `Esc` | Pause menu: Tuner, Photo mode, bookmark, copy link, Codex, Settings |
+| `T` | Tuner: the fractal's parameters (each explained), palettes, light and atmosphere |
+| `P` | Photo mode: depth of field, exposure, bloom, Save PNG |
+| `R` | Back to the start of the world |
+| `B` | Breathing (gentle parameter animation) |
+| `M`, `X` | Mutate the shape; jump somewhere new |
+
+Settings holds quality, motion smoothing, the headlamp, field of view, mouse sensitivity,
+flight speed, and whether the HUD and the renderer statistics are shown.
 
 ## How it works
 
@@ -76,9 +103,11 @@ and resolution scale while moving, and accumulation progress once still.
 src/main.ts               boot, frame loop, error overlay
 src/app/                  fractal definitions, palettes, presets, state and quality tables
 src/camera/               orbit / zoom / fly camera and input bindings
+src/game/                 screen state, motes, progress
+src/explore/              quests, field notes, saved progress and share links
 src/math/de.ts            CPU mirrors of the distance estimators (tests, picking)
 src/render/               WebGL2 helpers, the renderer, and shaders/
-src/ui/                   control panel and styles
+src/ui/                   menu, HUD, Tuner, Codex, Settings, Photo mode, touch controls, styles
 tests/                    Vitest suites
 scripts/capture.mjs       headless verification and screenshots
 docs/MATH.md              the mathematics
@@ -115,10 +144,13 @@ created only on resize.
   letting the image dissolve into noise. Going deeper would need emulated double precision
   in the shader.
 - **Iterations rise automatically with zoom**, on top of the slider value, capped at 24.
-- **Desktop mouse or trackpad.** There is no touch gesture support; the layout does adapt
-  to narrow windows.
-- **`window.__pz`** is a small automation hook (load a preset, query convergence) used by
-  the capture script. It holds no state of its own.
+- **Flight stays on the GPU.** A CPU frame takes seconds, so Free Fly stops at the float32
+  limit and offers Study (Tab) to go deeper.
+- **The headlamp, stars and motes are drawn only in flight and behind the menu**, so the
+  CPU renderer, which knows none of them, always matches the GPU in Study.
+- **`window.__pz`** is a small automation hook (open a preset or a world, fly a scripted
+  path, query convergence) used by the capture script, because pointer lock is unreliable
+  in headless Chrome. It holds no state of its own.
 - **GitHub Pages**: `.github/workflows/deploy.yml` builds, tests and publishes `dist/` on
   every push to `main`. Pages must be enabled once in the repository settings with
   *Source: GitHub Actions*.
