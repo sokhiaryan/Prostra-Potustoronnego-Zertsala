@@ -1,5 +1,10 @@
-// Scene pass: sphere-trace the fractal and shade it to linear HDR.
+// Scene pass: sphere-trace the fractal and shade it to linear HDR. Alpha carries the
+// hit distance (negative for sky) so moving frames can be reprojected.
 // The renderer prepends "#version", "#define FRACTAL n", precision and de.glsl.
+//
+// src/math/shade.ts mirrors this file for images computed on the CPU. The game-only
+// terms below (headlamp, motes, stars, lens) are all switched by uniforms that are zero
+// whenever the CPU renderer is in charge, so they have no counterpart there.
 uniform vec2 uRes;        // size of the viewport being rendered, in pixels
 uniform vec2 uJitter;     // sub-pixel offset in [-0.5, 0.5] for accumulation AA
 uniform vec3 uCamPos;
@@ -23,6 +28,14 @@ uniform vec3 uSunCol;
 uniform vec3 uGlowCol;
 uniform float uFogDensity;
 uniform float uGlow;
+uniform float uLamp;      // headlamp strength; 0 = off
+uniform float uLampRange; // distance at which the headlamp has fallen to half
+uniform vec4 uMotes[8];   // xyz = position, w = glow radius; nearest first
+uniform int uMoteCount;
+uniform float uStars;     // star field strength; fades out with depth
+uniform vec2 uLens;       // point on the unit lens disc for this sample
+uniform float uAperture;  // lens radius in world units; 0 = pinhole
+uniform float uFocus;     // distance of the plane in focus, along the view axis
 
 out vec4 fragColor;
 
@@ -57,9 +70,33 @@ vec3 skyBase(vec3 rd) {
   return c;
 }
 
+float hash31(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+
+// Sparse points on the sky sphere: one candidate per cell of a grid the view ray is
+// scaled into, lit only in the few cells whose hash is high.
+vec3 stars(vec3 rd) {
+  vec3 q = rd * 150.0;
+  vec3 id = floor(q);
+  float h = hash31(id);
+  if (h < 0.965) return vec3(0.0);
+  vec3 c = id + 0.5 + (vec3(hash31(id + 7.1), hash31(id + 13.7), hash31(id + 29.3)) - 0.5) * 0.5;
+  float b = (h - 0.965) / 0.035;
+  return mix(vec3(1.0), uGlowCol, 0.35) * (0.15 + 1.6 * b * b) * smoothstep(0.34, 0.0, length(q - c));
+}
+
 vec3 sky(vec3 rd) {
   float s = max(dot(rd, uSunDir), 0.0);
-  return skyBase(rd) + uSunCol * 5.0 * pow(s, 1200.0);
+  vec3 c = skyBase(rd) + uSunCol * 5.0 * pow(s, 1200.0);
+  if (uStars > 0.0) c += stars(rd) * uStars;
+  return c;
+}
+
+vec3 moteColor() {
+  return mix(uGlowCol, vec3(1.0), 0.45);
 }
 
 vec2 sphereHit(vec3 ro, vec3 rd, float r) {
@@ -177,6 +214,22 @@ vec3 shade(vec3 p, vec3 n, vec3 rd, float t, float eps, vec4 trap) {
   // and grazing angles pick up a thin sheen. Both scale with the Glow control.
   col += palette(tc + 0.5) * uGlowCol * cav * cav * cav * 0.3 * uGlow;
   col += uGlowCol * fres * ao * 0.10 * uGlow;
+
+  // Headlamp: a light carried by the camera, so interiors the sun never reaches stay
+  // readable. It falls off with distance, leaving sunlit vistas as they were.
+  if (uLamp > 0.0) {
+    float fall = 1.0 / (1.0 + (t * t) / (uLampRange * uLampRange));
+    col += brdf(n, v, v, albedo, F0) * uSunCol * (uLamp * fall * mix(0.4, 1.0, ao));
+  }
+
+  // The nearest mote lights the surface around it.
+  if (uMoteCount > 0) {
+    vec3 L = uMotes[0].xyz - p;
+    float r2 = uMotes[0].w * uMotes[0].w;
+    float d2 = dot(L, L);
+    float ml = max(dot(n, L * inversesqrt(max(d2, 1e-30))), 0.0);
+    col += albedo * moteColor() * (ml * ao * 14.0 * r2 / (d2 + r2));
+  }
   return col;
 }
 
@@ -184,6 +237,13 @@ void main() {
   vec2 ndc = (2.0 * (gl_FragCoord.xy + uJitter) - uRes) / uRes.y;
   vec3 rd = normalize(uCamBasis * vec3(ndc * uTanFov, 1.0));
   vec3 ro = uCamPos;
+  if (uAperture > 0.0) {
+    // Thin lens: start from a point on the lens and aim at where the pinhole ray meets
+    // the focal plane. Averaged over many samples this blurs everything off that plane.
+    vec3 focal = ro + rd * (uFocus / dot(rd, uCamBasis[2]));
+    ro += (uCamBasis[0] * uLens.x + uCamBasis[1] * uLens.y) * uAperture;
+    rd = normalize(focal - ro);
+  }
   float pix = 2.0 * uTanFov / uRes.y; // world-space pixel size at unit distance
 
   vec2 bnd = sphereHit(ro, rd, uBound);
@@ -224,6 +284,20 @@ void main() {
     col += uGlowCol * uGlow * halo * (1.0 - smoothstep(0.5, 0.98, edge));
   }
 
+  // Motes: a bright core and a soft halo around the ray's closest approach to each one.
+  // A mote just behind a surface still shows through faintly, so it can be found.
+  for (int i = 0; i < 8; i++) {
+    if (i >= uMoteCount) break;
+    vec3 oc = uMotes[i].xyz - ro;
+    float r = uMotes[i].w;
+    float tm = dot(oc, rd);
+    if (tm <= 0.0) continue;
+    float d2 = max(dot(oc, oc) - tm * tm, 0.0) / (r * r);
+    float g = 6.0 * exp(-1.5 * d2) + 0.6 / (1.0 + d2);
+    if (hit && tm > t) g *= exp(-(tm - t) / (3.0 * r));
+    col += moteColor() * g;
+  }
+
   if (!(col.r >= 0.0 && col.g >= 0.0 && col.b >= 0.0)) col = vec3(0.0); // NaN guard
-  fragColor = vec4(min(col, vec3(48.0)), 1.0);
+  fragColor = vec4(min(col, vec3(48.0)), hit ? t : -1.0);
 }

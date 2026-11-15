@@ -1,4 +1,5 @@
-// Orbit / dolly / fly camera with inertia.
+// Orbit / dolly / fly camera with inertia, in two modes: "orbit" turns around a pivot on
+// the surface (Study), "fly" turns in place and slides along walls (Free Fly).
 //
 // Every motion is relative: orbiting turns around a pivot on the surface, zooming is an
 // exponential approach to the surface point under the cursor, and fly speed follows the
@@ -12,8 +13,14 @@ const PITCH_LIMIT = 1.553; // ~89 degrees
 const ORBIT_FRICTION = 4.5;
 const ZOOM_RESPONSE = 12;
 const FLY_RESPONSE = 8;
+const BOOST = 3;
+export const GEAR_MIN = 0.25;
+export const GEAR_MAX = 4;
+
+export type CameraMode = 'orbit' | 'fly';
 
 export class Camera {
+  mode: CameraMode = 'orbit';
   readonly pos = new Float64Array(3);
   readonly pivot = new Float64Array(3);
   yaw = 0;
@@ -37,6 +44,18 @@ export class Camera {
   flyX = 0;
   flyY = 0;
   flyZ = 0;
+  /** Fly mode: hold for BOOST times the speed. */
+  boost = false;
+  /** Fly mode: speed multiplier chosen by the player, GEAR_MIN to GEAR_MAX. */
+  gear = 1;
+  /** Fly mode: speed multiplier from the settings, on top of the gear. */
+  speedScale = 1;
+  /** Fly mode: distance estimate at the camera as of the last update. */
+  proximity = 1;
+  /** Fly mode: the last update was deflected along a surface. */
+  sliding = false;
+  /** Viewport height in CSS pixels, for sizing a pixel when tracing the view axis. */
+  viewportH = 900;
 
   private pendYaw = 0;
   private pendPitch = 0;
@@ -102,6 +121,43 @@ export class Camera {
     this.pendPitch += dPitch;
   }
 
+  /** Turn the view in place (radians). The pivot is re-aimed on the next update. */
+  look(dYaw: number, dPitch: number): void {
+    this.yaw += dYaw;
+    this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch + dPitch));
+    this.updateBasis();
+    this.panned = true;
+  }
+
+  /** Switch between orbiting and flying. All motion stops; the pivot moves to what is ahead. */
+  setMode(mode: CameraMode, dist: DistFn): void {
+    this.mode = mode;
+    this.velYaw = this.velPitch = 0;
+    this.pendYaw = this.pendPitch = 0;
+    this.zoomPending = 0;
+    this.flyVel.fill(0);
+    this.dragging = false;
+    this.boost = false;
+    this.sliding = false;
+    this.proximity = dist(this.pos[0], this.pos[1], this.pos[2]);
+    this.aimPivot(dist);
+  }
+
+  /**
+   * Put the pivot on the surface straight ahead, or one scene radius away when looking at
+   * open sky. In flight this keeps viewScale() equal to the distance of what is being
+   * looked at, and leaves the pivot in the right place for orbiting afterwards.
+   */
+  private aimPivot(dist: DistFn): void {
+    const hit = this.trace(0, 0, dist, this.viewportH);
+    const far = this.sceneSize;
+    const t = hit < 0 ? far : Math.min(far, Math.max(this.minDist, hit));
+    const { pos, pivot, fwd: f } = this;
+    pivot[0] = pos[0] + f[0] * t;
+    pivot[1] = pos[1] + f[1] * t;
+    pivot[2] = pos[2] + f[2] * t;
+  }
+
   /** Rotate the camera rigidly about the pivot, so the pivot keeps its place on screen. */
   private applyOrbit(dYaw: number, dPitch: number): void {
     const { pos, pivot, right: r, up: u, fwd: f } = this;
@@ -142,6 +198,19 @@ export class Camera {
    * ndcX is in [-aspect, aspect], ndcY in [-1, 1] (up positive). Returns false on a miss.
    */
   pickPivot(ndcX: number, ndcY: number, dist: DistFn, viewportHeightPx: number): boolean {
+    const t = this.trace(ndcX, ndcY, dist, viewportHeightPx);
+    if (t < 0) return false;
+    const d = this.rayDir;
+    this.pivot[0] = this.pos[0] + d[0] * t;
+    this.pivot[1] = this.pos[1] + d[1] * t;
+    this.pivot[2] = this.pos[2] + d[2] * t;
+    return true;
+  }
+
+  private readonly rayDir = new Float64Array(3);
+
+  /** Distance along the ray through a screen point to the surface, or -1 on a miss. The direction is left in rayDir. */
+  trace(ndcX: number, ndcY: number, dist: DistFn, viewportHeightPx: number): number {
     const { pos, right: r, up: u, fwd: f } = this;
     const tx = ndcX * this.tanFov;
     const ty = ndcY * this.tanFov;
@@ -152,20 +221,45 @@ export class Camera {
     dx *= inv;
     dy *= inv;
     dz *= inv;
+    this.rayDir[0] = dx;
+    this.rayDir[1] = dy;
+    this.rayDir[2] = dz;
     const pix = (2 * this.tanFov) / Math.max(1, viewportHeightPx);
     const tMax = this.maxDist * 2;
     let t = 0;
     for (let i = 0; i < 400 && t < tMax; i++) {
       const d = dist(pos[0] + dx * t, pos[1] + dy * t, pos[2] + dz * t);
-      if (d < Math.max(pix * t, this.minDist * 1e-3)) {
-        this.pivot[0] = pos[0] + dx * t;
-        this.pivot[1] = pos[1] + dy * t;
-        this.pivot[2] = pos[2] + dz * t;
-        return true;
-      }
+      if (d < Math.max(pix * t, this.minDist * 1e-3)) return t;
       t += d * this.stepScale;
     }
-    return false;
+    return -1;
+  }
+
+  /**
+   * Remove the part of the fly velocity that points into the surface, using the gradient
+   * of the distance field at the camera. Returns false if the velocity was not heading in.
+   */
+  private deflect(dist: DistFn, d0: number): boolean {
+    const { pos, flyVel: v } = this;
+    const h = Math.max(d0 * 0.25, this.minDist * 0.05);
+    const a = dist(pos[0] + h, pos[1] - h, pos[2] - h);
+    const b = dist(pos[0] - h, pos[1] - h, pos[2] + h);
+    const c = dist(pos[0] - h, pos[1] + h, pos[2] - h);
+    const d = dist(pos[0] + h, pos[1] + h, pos[2] + h);
+    let nx = a - b - c + d;
+    let ny = -a - b + c + d;
+    let nz = -a + b - c + d;
+    const len = Math.hypot(nx, ny, nz);
+    if (!(len > 0)) return false;
+    nx /= len;
+    ny /= len;
+    nz /= len;
+    const vn = v[0] * nx + v[1] * ny + v[2] * nz;
+    if (vn >= 0) return false;
+    v[0] -= vn * nx;
+    v[1] -= vn * ny;
+    v[2] -= vn * nz;
+    return true;
   }
 
   /** Advance inertia and apply queued input. Returns true if the view changed. */
@@ -173,6 +267,13 @@ export class Camera {
     let moved = this.panned;
     this.panned = false;
     const { pos, pivot } = this;
+    const fly = this.mode === 'fly';
+    if (fly) {
+      // Orbit and zoom belong to the other mode; nothing queued for them carries over.
+      this.pendYaw = this.pendPitch = 0;
+      this.velYaw = this.velPitch = 0;
+      this.zoomPending = 0;
+    }
 
     // Orbit: direct while dragging, coasting on the measured velocity afterwards.
     let dYaw = 0;
@@ -231,9 +332,13 @@ export class Camera {
     // Fly: speed follows the distance to the surface, so it slows down as detail approaches.
     const v = this.flyVel;
     const flying = this.flyX !== 0 || this.flyY !== 0 || this.flyZ !== 0;
-    if (flying || v[0] !== 0 || v[1] !== 0 || v[2] !== 0) {
+    this.sliding = false;
+    if (fly || flying || v[0] !== 0 || v[1] !== 0 || v[2] !== 0) {
       const { right: r, up: u, fwd: f } = this;
-      const speed = Math.min(this.sceneSize, Math.max(this.minDist, dist(pos[0], pos[1], pos[2]))) * 1.4;
+      const d0 = dist(pos[0], pos[1], pos[2]);
+      this.proximity = d0;
+      let speed = Math.min(this.sceneSize, Math.max(this.minDist, d0)) * 1.4;
+      if (fly) speed *= this.gear * this.speedScale * (this.boost ? BOOST : 1);
       const a = 1 - Math.exp(-dt * FLY_RESPONSE);
       let mag = 0;
       for (let i = 0; i < 3; i++) {
@@ -244,10 +349,26 @@ export class Camera {
       if (!flying && mag < speed * speed * 1e-6) {
         v.fill(0);
       } else {
-        const nx = pos[0] + v[0] * dt;
-        const ny = pos[1] + v[1] * dt;
-        const nz = pos[2] + v[2] * dt;
-        if (Math.hypot(nx, ny, nz) < this.maxDist && dist(nx, ny, nz) > this.minDist * 0.5) {
+        // In flight the camera keeps a full minDist of clearance, may always back away
+        // from a surface, and glances off one it cannot pass instead of stopping.
+        const margin = fly ? this.minDist : this.minDist * 0.5;
+        const clear = (x: number, y: number, z: number): boolean => {
+          if (Math.hypot(x, y, z) >= this.maxDist) return false;
+          const d = dist(x, y, z);
+          return d > margin || (fly && d > d0);
+        };
+        let nx = pos[0] + v[0] * dt;
+        let ny = pos[1] + v[1] * dt;
+        let nz = pos[2] + v[2] * dt;
+        let ok = clear(nx, ny, nz);
+        if (!ok && fly && this.deflect(dist, d0)) {
+          nx = pos[0] + v[0] * dt;
+          ny = pos[1] + v[1] * dt;
+          nz = pos[2] + v[2] * dt;
+          ok = clear(nx, ny, nz);
+          this.sliding = ok && Math.hypot(v[0], v[1], v[2]) > speed * 0.05;
+        }
+        if (ok) {
           pos[0] = nx;
           pos[1] = ny;
           pos[2] = nz;
@@ -258,7 +379,10 @@ export class Camera {
       }
     }
 
-    if (moved) this.updateBasis();
+    if (moved) {
+      this.updateBasis();
+      if (fly) this.aimPivot(dist);
+    }
     return moved;
   }
 }

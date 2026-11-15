@@ -35,6 +35,49 @@ export function deBulb(
   return (0.5 * Math.log(Math.max(r, 1e-9)) * r) / dr;
 }
 
+/** deBulb plus the orbit trap of map() in de.glsl: trap = (min |x|, min |y|, min |z|, min r^2). */
+export function deBulbTrap(
+  px: number,
+  py: number,
+  pz: number,
+  power: number,
+  phaseTheta: number,
+  phasePhi: number,
+  iter: number,
+  trap: Float64Array,
+): number {
+  let x = px;
+  let y = py;
+  let z = pz;
+  let dr = 1;
+  let r = Math.hypot(x, y, z);
+  let t0 = Math.abs(x);
+  let t1 = Math.abs(y);
+  let t2 = Math.abs(z);
+  let t3 = r * r;
+  for (let i = 0; i < iter && r <= BULB_BAILOUT; i++) {
+    const rs = Math.max(r, 1e-9);
+    const theta = Math.acos(Math.min(1, Math.max(-1, z / rs))) * power + phaseTheta;
+    const phi = Math.atan2(y, x) * power + phasePhi;
+    dr = power * Math.pow(rs, power - 1) * dr + 1;
+    const zr = Math.pow(rs, power);
+    const st = Math.sin(theta);
+    x = zr * st * Math.cos(phi) + px;
+    y = zr * st * Math.sin(phi) + py;
+    z = zr * Math.cos(theta) + pz;
+    r = Math.hypot(x, y, z);
+    t0 = Math.min(t0, Math.abs(x));
+    t1 = Math.min(t1, Math.abs(y));
+    t2 = Math.min(t2, Math.abs(z));
+    t3 = Math.min(t3, r * r);
+  }
+  trap[0] = t0;
+  trap[1] = t1;
+  trap[2] = t2;
+  trap[3] = t3;
+  return (0.5 * Math.log(Math.max(r, 1e-9)) * r) / dr;
+}
+
 function boxFold(v: number, fold: number): number {
   return Math.min(fold, Math.max(-fold, v)) * 2 - v;
 }
@@ -66,6 +109,50 @@ export function deBox(
     dr = dr * k * as + 1;
     if (x * x + y * y + z * z > 1e6) break;
   }
+  return Math.hypot(x, y, z) / Math.abs(dr);
+}
+
+/** deBox plus the orbit trap of map() in de.glsl. */
+export function deBoxTrap(
+  px: number,
+  py: number,
+  pz: number,
+  scale: number,
+  minRadius: number,
+  fold: number,
+  iter: number,
+  trap: Float64Array,
+): number {
+  const minR2 = minRadius * minRadius;
+  const as = Math.abs(scale);
+  let x = px;
+  let y = py;
+  let z = pz;
+  let dr = 1;
+  let t0 = Math.abs(x);
+  let t1 = Math.abs(y);
+  let t2 = Math.abs(z);
+  let t3 = x * x + y * y + z * z;
+  for (let i = 0; i < iter; i++) {
+    x = boxFold(x, fold);
+    y = boxFold(y, fold);
+    z = boxFold(z, fold);
+    const k = 1 / Math.min(1, Math.max(minR2, x * x + y * y + z * z));
+    x = x * k * scale + px;
+    y = y * k * scale + py;
+    z = z * k * scale + pz;
+    dr = dr * k * as + 1;
+    const m2 = x * x + y * y + z * z;
+    t0 = Math.min(t0, Math.abs(x));
+    t1 = Math.min(t1, Math.abs(y));
+    t2 = Math.min(t2, Math.abs(z));
+    t3 = Math.min(t3, m2);
+    if (m2 > 1e6) break;
+  }
+  trap[0] = t0;
+  trap[1] = t1;
+  trap[2] = t2;
+  trap[3] = t3;
   return Math.hypot(x, y, z) / Math.abs(dr);
 }
 
@@ -117,6 +204,58 @@ export function deKifs(
     z = 0.5 * c - Math.abs(rz * scale - 0.5 * c);
     w *= scale;
   }
+  const qx = Math.abs(x) - 1;
+  const qy = Math.abs(y) - 1;
+  const qz = Math.abs(z) - 1;
+  const outside = Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0));
+  const inside = Math.min(Math.max(qx, qy, qz), 0);
+  return (outside + inside) / w;
+}
+
+/** deKifs plus the orbit trap of map() in de.glsl. */
+export function deKifsTrap(
+  px: number,
+  py: number,
+  pz: number,
+  scale: number,
+  rot: ArrayLike<number>,
+  offZ: number,
+  iter: number,
+  trap: Float64Array,
+): number {
+  const c = offZ * (scale - 1);
+  let x = px;
+  let y = py;
+  let z = pz;
+  let w = 1;
+  let t: number;
+  let t0 = Math.abs(x);
+  let t1 = Math.abs(y);
+  let t2 = Math.abs(z);
+  let t3 = x * x + y * y + z * z;
+  for (let i = 0; i < iter; i++) {
+    x = Math.abs(x);
+    y = Math.abs(y);
+    z = Math.abs(z);
+    if (x < y) { t = x; x = y; y = t; }
+    if (x < z) { t = x; x = z; z = t; }
+    if (y < z) { t = y; y = z; z = t; }
+    const rx = rot[0] * x + rot[3] * y + rot[6] * z;
+    const ry = rot[1] * x + rot[4] * y + rot[7] * z;
+    const rz = rot[2] * x + rot[5] * y + rot[8] * z;
+    x = rx * scale - (scale - 1);
+    y = ry * scale - (scale - 1);
+    z = 0.5 * c - Math.abs(rz * scale - 0.5 * c);
+    w *= scale;
+    t0 = Math.min(t0, Math.abs(x));
+    t1 = Math.min(t1, Math.abs(y));
+    t2 = Math.min(t2, Math.abs(z));
+    t3 = Math.min(t3, x * x + y * y + z * z);
+  }
+  trap[0] = t0;
+  trap[1] = t1;
+  trap[2] = t2;
+  trap[3] = t3;
   const qx = Math.abs(x) - 1;
   const qy = Math.abs(y) - 1;
   const qz = Math.abs(z) - 1;
